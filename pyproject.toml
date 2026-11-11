@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rlm-ig"
+version = "0.1.0"
+description = "Recursive language models over a real Python REPL, driven by Claude Code, opencode, or any API."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ishaan Gupta" }]
+keywords = ["llm", "agents", "rlm", "recursive-language-models", "long-context", "claude-code", "opencode"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.60"]
+dev = ["pytest>=8", "ruff>=0.6", "pydantic>=2"]
+
+[project.scripts]
+rlm = "rlm_ig.cli:main"
+
+[project.urls]
+Repository = "https://github.com/ishaangupta-yb/rlm-ig"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rlm_ig"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "live: talks to a real model backend (needs credentials; skipped unless RLM_LIVE=1)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# The worker runs inside the sandbox, possibly under an older interpreter in a
+# container image, so it sticks to syntax and idioms that work on Python 3.8+.
+"src/rlm_ig/sandbox/worker.py" = ["UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rlm_ig"]
+known-local-folder = ["helpers"]

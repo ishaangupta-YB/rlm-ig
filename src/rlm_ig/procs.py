@@ -14,22 +14,36 @@ import contextlib
 import os
 import signal
 
-_live: set[int] = set()
+_live: dict[int, bool] = {}  # pid -> whether it leads its own process group
 
 
-def track(pid: int) -> None:
-    _live.add(pid)
+def track(pid: int, *, group: bool = False) -> None:
+    _live[pid] = group
 
 
 def untrack(pid: int) -> None:
-    _live.discard(pid)
+    _live.pop(pid, None)
+
+
+def kill(pid: int, *, group: bool = False, sig: int | None = None) -> None:
+    """Signal a process, or its whole group when it was started as a group leader.
+
+    Some CLIs are thin launchers that spawn the real program as a child; only
+    a group signal reaches both.
+    """
+    if sig is None:
+        sig = signal.SIGKILL if os.name == "posix" else signal.SIGTERM
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        if group and os.name == "posix":
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
 
 
 @atexit.register
 def _reap() -> None:
-    for pid in list(_live):
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.kill(pid, signal.SIGKILL if os.name == "posix" else signal.SIGTERM)
+    for pid, group in list(_live.items()):
+        kill(pid, group=group)
     _live.clear()
 
 

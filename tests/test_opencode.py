@@ -9,8 +9,9 @@ import pytest
 
 import rlm_ig as rlm
 from fakes.openai_server import OpenAIServer, last_user_text, system_text
-from helpers import block, run_async
 from rlm_ig.models.opencode import OpenCode, _usage, project_config
+
+from helpers import block, run_async
 
 OPENCODE = shutil.which("opencode")
 needs_opencode = pytest.mark.skipif(OPENCODE is None, reason="the opencode CLI is not installed")

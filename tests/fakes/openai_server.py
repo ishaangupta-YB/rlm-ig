@@ -69,7 +69,12 @@ class OpenAIServer:
                     self.wfile.flush()
 
                 chunk = {**base, "object": "chat.completion.chunk"}
-                event({**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]})
+                event(
+                    {
+                        **chunk,
+                        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                    }
+                )
                 for start in range(0, len(text), 16):
                     delta = {"content": text[start : start + 16]}
                     event({**chunk, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]})

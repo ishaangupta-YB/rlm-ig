@@ -86,3 +86,28 @@ def first_line(text: str, width: int = 100) -> str:
 def approx_tokens(chars: int) -> int:
     """A rough character-to-token conversion for estimates and guards."""
     return max(1, chars // 4)
+
+
+def looks_runaway(text: str, *, max_chars: int = 80_000) -> bool:
+    """True when a streamed reply has clearly degenerated.
+
+    Models occasionally fall into a loop and emit the same short fragment
+    until they hit their output ceiling. Two signs: the reply is far longer
+    than any sensible REPL step, or its tail is one short unit repeated many
+    times over.
+    """
+    if len(text) > max_chars:
+        return True
+    if len(text) < 1500:
+        return False
+    tail = text[-1200:]
+    for period in range(1, 61):
+        unit = tail[-period:]
+        if not unit.strip():
+            continue
+        # At least 600 characters of pure repetition: long enough that a ruler
+        # line or a padded table in a legitimate reply never trips it.
+        need = max(12, -(-600 // period))
+        if tail.endswith(unit * need):
+            return True
+    return False

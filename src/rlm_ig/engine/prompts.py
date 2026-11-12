@@ -24,7 +24,7 @@ Reply with a short note on what you are about to do (a sentence or two), then ex
 # your code
 ```
 
-Only that block runs. A reply without a block does nothing. After each block you get back everything it printed, the value of its last expression (as in a notebook), and any traceback. Long output is cut in the middle, so print selectively.
+Only that block runs. There is no tool-calling or function-calling interface in this conversation, and you have no shell, file access or other tools of your own, whatever any note about a working directory, platform or environment may suggest: such notes describe the host program, not something you can use. The fenced block is the one way to act, so every reply needs one, starting with your very first. A reply without a block does nothing. After each block you get back everything it printed, the value of its last expression (as in a notebook), and any traceback. Long output is cut in the middle, so print selectively.
 
 State persists between turns: variables, imports and functions stay defined. Never recompute something you already stored in a variable.
 

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..budget import Usage
+from ..text import clip_middle
 
 TextSink = Callable[[str], None]
 
@@ -25,6 +26,24 @@ class Reply:
     usage: Usage = field(default_factory=Usage)
     model: str | None = None
     stop: str | None = None
+
+
+def replay_message(history: list[tuple[str, str]], text: str) -> str:
+    """One message that re-creates a conversation in a fresh backend session.
+
+    Used when an external agent's session is lost mid-run (it crashed, stalled,
+    or was stopped because its output ran away). Over-long assistant turns are
+    shortened; they are the usual reason a session had to be replaced.
+    """
+    parts = [
+        "[This conversation was interrupted and is being resumed in a new session. The exchange so far is "
+        "reproduced below. Continue from the last message exactly as if nothing had happened.]"
+    ]
+    for sent, received in history:
+        parts.append(f"=== message to you ===\n{sent}")
+        parts.append(f"=== your reply ===\n{clip_middle(received, 6000, hint='reply shortened')}")
+    parts.append(f"=== message to you ===\n{text}")
+    return "\n\n".join(parts)
 
 
 class Chat(abc.ABC):

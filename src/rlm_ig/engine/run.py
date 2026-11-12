@@ -89,6 +89,10 @@ class Run:
             reply = await chat.send(message)
         self._account(reply, model)
         self.steps += 1
+        if reply.stop == "runaway":
+            self.events.emit(
+                "note", agent, depth, message="the model's output ran away and was cut off; its session was restarted"
+            )
         self.events.emit(
             "model.reply",
             agent,
@@ -96,7 +100,7 @@ class Run:
             step=step,
             text=reply.text,
             seconds=round(time.monotonic() - started - waited, 3),
-            usage=reply.usage.to_dict(),
+            usage=reply.usage.to_dict(calls=False),
             model=reply.model or model.spec,
         )
         return reply

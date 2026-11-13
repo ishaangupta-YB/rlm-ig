@@ -530,7 +530,27 @@ def test_unusable_batch_reply_falls_back_to_one_call_per_item(solve):
     script = [block("submit(ask_map('Upper-case it.', ['a', 'b', 'c']))")]
     result = solve(script, asks=asks)
     assert result.answer == ["A", "B", "C"]
-    assert result.usage.calls == 1 + 1 + 3  # root turn, the rejected batch, then one call per item
+    assert result.usage.calls == 1 + 2 + 3  # root turn, the batch and its repair attempt, then one call per item
+
+
+def test_batched_reply_is_repaired_before_falling_back(solve):
+    replies = iter(['["just one"]', '["A", "B", "C"]'])
+    script = [block("submit(ask_map('Upper-case it.', ['a', 'b', 'c']))")]
+    model = Scripted(script, asks=lambda p: next(replies))
+    result = solve(model)
+    assert result.answer == ["A", "B", "C"] and result.usage.calls == 3
+    assert "Your previous reply was rejected" in model.turns[-1].last
+
+
+def test_bare_values_are_accepted_for_single_field_object_schemas(solve):
+    def asks(prompt):
+        return json.dumps(["billing" if "charge" in item else "other" for item in batch_items(prompt)])
+
+    schema = {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}
+    script = [block(f"submit(ask_map('Classify.', ['a charge', 'a hello', 'charged twice'], schema={schema!r}))")]
+    result = solve(script, asks=asks)
+    assert result.answer == [{"category": "billing"}, {"category": "other"}, {"category": "billing"}]
+    assert result.usage.calls == 2
 
 
 def test_large_items_and_distinct_prompts_are_never_batched(solve, cfg):

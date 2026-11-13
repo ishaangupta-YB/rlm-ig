@@ -140,9 +140,15 @@ class Run:
         wrapper = {"type": "array", "minItems": count, "maxItems": count, "items": schema or {}}
         system = prompts.batch_system(count, schema)
         reply = await self._complete(self.sub_model, system, text)
-        problems, value = _parse(reply.text, wrapper)
+        problems, value = _parse_batch(reply.text, wrapper, schema)
         if problems:
-            raise ModelError("batched reply was not usable: " + "; ".join(problems[:2]))
+            # One repair call is far cheaper than falling back to a call per item.
+            reply = await self._complete(
+                self.sub_model, system, text + "\n\n" + prompts.ask_repair(reply.text, problems)
+            )
+            problems, value = _parse_batch(reply.text, wrapper, schema)
+            if problems:
+                raise ModelError("batched reply was not usable: " + "; ".join(problems[:2]))
         if schema:
             return list(value)
         return [item.strip() if isinstance(item, str) else json.dumps(item, ensure_ascii=False) for item in value]
@@ -165,6 +171,25 @@ class Run:
                     "max_calls and max_tokens still apply (add a [pricing] entry to estimate cost)"
                 ),
             )
+
+
+def _parse_batch(text: str, wrapper: dict, schema: dict | None) -> tuple[list[str], Any]:
+    """Parse a batched reply, tolerating one common shortcut.
+
+    Asked for a list of single-field objects, models often return the bare
+    field values instead. When the item schema is an object with exactly one
+    property, such values are wrapped back into objects before validation.
+    """
+    problems, value = _parse(text, wrapper)
+    if not problems or not schema or not isinstance(value, list):
+        return problems, value
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    if schema.get("type") == "object" and len(properties) == 1:
+        (key,) = properties
+        wrapped = [item if isinstance(item, dict) else {key: item} for item in value]
+        if not validate(wrapped, wrapper):
+            return [], wrapped
+    return problems, value
 
 
 def _parse(text: str, schema: dict) -> tuple[list[str], Any]:

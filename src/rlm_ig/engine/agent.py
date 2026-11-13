@@ -250,8 +250,14 @@ class Agent:
                     return
                 except asyncio.CancelledError:
                     raise
-                except Exception:  # noqa: BLE001
-                    pass  # the batched call was unusable: ask for each item separately
+                except Exception as exc:  # noqa: BLE001
+                    # The batched call was unusable: ask for each item separately.
+                    self.run.events.emit(
+                        "note",
+                        self.id,
+                        self.depth,
+                        message=f"ask_map: a batch of {len(indices)} items fell back to single calls ({exc})",
+                    )
                 else:
                     for i, value in zip(indices, values, strict=True):
                         results[i] = value

@@ -89,7 +89,10 @@ Reply with a single JSON array of exactly {n} elements and nothing else: no pros
 
 def batch_system(n: int, schema: dict | None) -> str:
     if schema:
-        each = "Every element must satisfy this JSON Schema:\n\n" + json.dumps(schema, indent=1)
+        each = (
+            "Every element must be a complete value satisfying this JSON Schema (for an object schema, an object "
+            "with its keys, never a bare value):\n\n" + json.dumps(schema, indent=1)
+        )
     else:
         each = "Every element is a JSON string holding the answer for that item."
     return ASK_SYSTEM + BATCH_JSON.format(n=n, each=each)

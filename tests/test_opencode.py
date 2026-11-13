@@ -109,7 +109,7 @@ def test_full_run_with_sub_calls_through_the_server(upstream, cfg):
         result = rlm.run("Ping twice.", model="opencode:mock/m1", config=cfg)
     assert result.ok and result.answer == ["PONG", "PONG", "NOT FOUND"]
     assert result.usage.calls == 5 and result.usage.input_tokens == 600
-    listing = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+    listing = subprocess.run(["ps", "-ewwo", "args"], capture_output=True, text=True).stdout
     assert not any(" serve --hostname 127.0.0.1" in line and "opencode" in line for line in listing.splitlines())
 
 

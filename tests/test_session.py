@@ -43,7 +43,7 @@ def make(cfg):
 
 
 def worker_count() -> int:
-    out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+    out = subprocess.run(["ps", "-ewwo", "args"], capture_output=True, text=True).stdout
     return sum("rlm-worker" in line for line in out.splitlines())
 
 

@@ -177,7 +177,7 @@ def test_full_run_through_the_cli_backend(fake, cfg):
 
 def test_no_cli_processes_are_left_behind(fake, cfg):
     def running() -> int:
-        listing = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+        listing = subprocess.run(["ps", "-ewwo", "args"], capture_output=True, text=True).stdout
         return sum(FAKE in line.split()[:2] for line in listing.splitlines())
 
     make, _ = fake

@@ -137,7 +137,7 @@ def test_connection_problems_name_the_server():
 
 def test_a_failing_server_does_not_leave_the_others_running():
     def running() -> int:
-        listing = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+        listing = subprocess.run(["ps", "-ewwo", "args"], capture_output=True, text=True).stdout
         return sum(SERVER in line.split()[:3] for line in listing.splitlines())
 
     before = running()

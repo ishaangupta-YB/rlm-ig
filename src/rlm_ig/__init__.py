@@ -21,14 +21,16 @@ from .errors import (
     StepsExhausted,
     ToolError,
 )
+from .loaders import load
 from .models import Model, Scripted
 from .sandbox import SandboxOptions
+from .session import Session
 from .tools import tool
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "run", "arun", "Result", "Config", "SandboxOptions", "Usage", "Event", "tool",
+    "run", "arun", "Session", "Result", "Config", "SandboxOptions", "Usage", "Event", "tool", "load",
     "Model", "Scripted",
     "RlmError", "ConfigError", "ModelError", "BudgetExceeded", "StepsExhausted",
     "SandboxError", "SchemaError", "ToolError", "RunFailed",

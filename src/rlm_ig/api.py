@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -78,7 +79,7 @@ class Result:
         }
 
     def __str__(self) -> str:
-        return self.answer if isinstance(self.answer, str) else repr(self.answer)
+        return _answer_text(self.answer)
 
 
 EventHandler = Callable[[Event], None]
@@ -182,7 +183,7 @@ class Engine:
             events.emit(
                 "run.end",
                 status=result.status,
-                answer=clip_middle(str(result), 4000) if result.status != "failed" else None,
+                answer=clip_middle(_answer_text(result.answer), 4000) if result.status != "failed" else None,
                 error=result.error,
                 note=result.note,
                 usage=result.usage.to_dict(),
@@ -211,6 +212,15 @@ class Engine:
                 await self._mcp.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _answer_text(answer: Any) -> str:
+    if isinstance(answer, str):
+        return answer
+    try:
+        return json.dumps(answer, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return repr(answer)
 
 
 def _context_line(context: Any, sandbox: Sandbox | None) -> str:

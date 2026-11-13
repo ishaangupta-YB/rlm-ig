@@ -420,10 +420,10 @@ def test_events_and_trace_file(solve, cfg):
     result = solve(script, asks="a", on_event=events.append)
     kinds = [e.kind for e in events]
     assert kinds == [
-        "run.start", "agent.start", "model.reply", "call.start", "call.end", "cell",
-        "model.reply", "cell", "agent.end", "run.end",
+        "run.start", "agent.start", "model.reply", "cell.start", "call.start", "call.end", "cell",
+        "model.reply", "cell.start", "cell", "agent.end", "run.end",
     ]  # fmt: skip
-    assert events[5]["code"].startswith("r = ask") and events[5]["output"] == "a"
+    assert events[6]["code"].startswith("r = ask") and events[6]["output"] == "a"
     assert events[-1]["status"] == "ok" and events[-1]["usage"]["calls"] == 3
 
     trace = read_trace(result.trace)

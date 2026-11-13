@@ -918,6 +918,16 @@ def main():
                         "size": len(as_text(value)) if value is not None else 0,
                     }
                 )
+            elif op == "describe":
+                value = _NS.get("context")
+                _WIRE.send(
+                    {
+                        "op": "context",
+                        "id": msg.get("id"),
+                        "summary": describe(value),
+                        "size": len(as_text(value)) if value is not None else 0,
+                    }
+                )
             elif op == "inventory":
                 _WIRE.send({"op": "inventory", "id": msg.get("id"), "rows": inventory()})
             elif op == "snapshot":

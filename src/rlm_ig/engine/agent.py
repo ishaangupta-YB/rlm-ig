@@ -166,6 +166,7 @@ class Agent:
                 continue
             prose_replies = 0
 
+            self.run.events.emit("cell.start", self.id, self.depth, step=step, code=code)
             result = await self.sandbox.run(code, self._on_call)
             shown = clip_middle(result.text, cfg.output_limit)
             self.run.events.emit(

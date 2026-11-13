@@ -347,6 +347,13 @@ class Sandbox:
         self.context_size = int(reply.get("size") or 0)
         return self.summary
 
+    async def describe(self) -> str:
+        """Refresh the summary from whatever ``context`` currently holds."""
+        reply = await self._request({"op": "describe"}, "context")
+        self.summary = reply.get("summary", "")
+        self.context_size = int(reply.get("size") or 0)
+        return self.summary
+
     async def inventory(self) -> list[dict]:
         return (await self._request({"op": "inventory"}, "inventory")).get("rows") or []
 

@@ -14,6 +14,7 @@ Sink = Callable[["Event"], None]
 #   run.start     task, model, sub_model, summary, limits
 #   agent.start   task, context_size, parent
 #   model.reply   step, text, seconds, usage, model
+#   cell.start    step, code
 #   cell          step, code, output, error, seconds, submitted
 #   call.start    call, op, name, n, chars
 #   call.end      call, op, name, n, seconds, ok, error, failed

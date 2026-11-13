@@ -278,6 +278,6 @@ def render_html(events: list[dict[str, Any]]) -> str:
             for agent_id, a in trace.agents.items()
         },
     }
-    data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/").replace("<!--", "<\\u0021--")
     title = html.escape(first_line(trace.start.get("task", "run"), 60))
     return _PAGE.replace("__TITLE__", title).replace("__DATA__", data)

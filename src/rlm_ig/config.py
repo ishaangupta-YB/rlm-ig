@@ -58,6 +58,10 @@ class Config:
     output_limit: int = 8000
     #: largest ``ask`` input in characters; ``None`` uses the sub-model's default
     ask_limit: int | None = None
+    #: most items ``ask_map`` packs into one sub-model call (1 turns batching off)
+    ask_batch: int = 16
+    #: most characters of item data per batched call
+    ask_batch_chars: int = 24_000
     #: sub-agents get the parent's tools unless ``delegate(tools=...)`` says otherwise
     inherit_tools: bool = True
     #: refuse to hand a sub-agent nearly all of the parent's own context
@@ -84,7 +88,8 @@ class Config:
             self.verbosity = _VERBOSITY[self.verbosity]
         if isinstance(self.sandbox, dict):
             self.sandbox = _sandbox_from(self.sandbox)
-        self.sandbox.cell_timeout = float(self.cell_timeout)
+        # copy, so `replace()` never edits the sandbox options of the config it was called on
+        self.sandbox = dataclasses.replace(self.sandbox, cell_timeout=float(self.cell_timeout))
         self.validate()
 
     def validate(self) -> None:
@@ -94,6 +99,8 @@ class Config:
             raise ConfigError("max_steps must be at least 1")
         if self.output_limit < 200:
             raise ConfigError("output_limit must be at least 200 characters")
+        if self.ask_batch < 1 or self.ask_batch_chars < 1:
+            raise ConfigError("ask_batch and ask_batch_chars must be at least 1")
         if self.max_parallel is not None and self.max_parallel < 1:
             raise ConfigError("max_parallel must be at least 1")
         for name in ("max_calls", "max_usd", "max_tokens", "timeout"):

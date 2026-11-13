@@ -486,3 +486,72 @@ def test_no_worker_processes_are_left_behind(solve):
 def test_empty_task_is_rejected(cfg):
     with pytest.raises(rlm.ConfigError):
         rlm.run("  ", model=Scripted([]), config=cfg)
+
+
+# ----------------------------------------------------------------- batching
+
+
+def batch_items(prompt: str) -> list[str]:
+    return re.findall(r'<item index="\d+">\n(.*?)\n</item>', prompt, re.S)
+
+
+def test_ask_map_packs_small_items_into_shared_calls(solve):
+    seen: list[int] = []
+
+    def asks(prompt):
+        items = batch_items(prompt)
+        seen.append(len(items))
+        return json.dumps([item.upper() for item in items])
+
+    script = [block("submit(ask_map('Upper-case it.', [f'w{i}' for i in range(40)]))")]
+    result = solve(script, asks=asks)
+    assert result.answer == [f"W{i}" for i in range(40)]
+    assert seen == [16, 16, 8] or sorted(seen) == [8, 16, 16]
+    assert result.usage.calls == 4  # one root turn and three batched calls instead of forty
+
+
+def test_batched_calls_validate_each_item_against_the_schema(solve):
+    def asks(prompt):
+        return json.dumps([{"n": len(item)} for item in batch_items(prompt)])
+
+    script = [block("submit(ask_map('Measure.', ['a', 'bb', 'ccc'], schema={'type': 'object', 'required': ['n']}))")]
+    model = Scripted(script, asks=asks)
+    assert solve(model).answer == [{"n": 1}, {"n": 2}, {"n": 3}]
+    system = next(t.system for t in model.turns if t.oneshot)
+    assert "JSON array of exactly 3 elements" in system and '"required"' in system
+
+
+def test_unusable_batch_reply_falls_back_to_one_call_per_item(solve):
+    def asks(prompt):
+        if "<item index=" in prompt:
+            return json.dumps(["only one element"])  # wrong length for three items
+        return data_of(prompt).upper()
+
+    script = [block("submit(ask_map('Upper-case it.', ['a', 'b', 'c']))")]
+    result = solve(script, asks=asks)
+    assert result.answer == ["A", "B", "C"]
+    assert result.usage.calls == 1 + 1 + 3  # root turn, the rejected batch, then one call per item
+
+
+def test_large_items_and_distinct_prompts_are_never_batched(solve, cfg):
+    sizes: list[int] = []
+
+    def asks(prompt):
+        sizes.append(len(batch_items(prompt)))
+        return "x"
+
+    big = "y" * 20_000
+    script = [
+        block(
+            f"a = ask_map('Read.', ['{big}', '{big}'])\nb = ask_map(['one', 'two', 'three'])\nsubmit(len(a) + len(b))"
+        )
+    ]
+    assert solve(script, asks=asks).answer == 5
+    assert sizes == [0, 0, 0, 0, 0]
+
+
+def test_batching_can_be_switched_off(solve, cfg):
+    calls: list[str] = []
+    script = [block("submit(ask_map('Echo.', ['a', 'b', 'c']))")]
+    result = solve(script, asks=lambda p: calls.append(p) or data_of(p), config=cfg.replace(ask_batch=1))
+    assert result.answer == ["a", "b", "c"] and len(calls) == 3

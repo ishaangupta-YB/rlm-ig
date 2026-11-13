@@ -159,3 +159,15 @@ def test_parse_json_reply_variants():
     assert parse_json_reply('Sure. The result is {"ok": true} as requested.') == {"ok": True}
     with pytest.raises(ValueError):
         parse_json_reply("no json here")
+
+
+def test_code_with_a_mangled_opening_fence_is_salvaged():
+    reply = "The grep is capped, so I will split it myself.\n\n\n<invoke import re\nparts = re.split(r'---', context)\nprint(len(parts))\n```"
+    assert extract_code(reply) == "import re\nparts = re.split(r'---', context)\nprint(len(parts))"
+    tagged = 'Plan.\n\n<invoke name="python">\nx = 1\nprint(x)\n```'
+    assert extract_code(tagged) == "x = 1\nprint(x)"
+
+
+def test_salvage_does_not_invent_code_from_prose():
+    assert extract_code("I think the answer is 42.\n```") is None
+    assert extract_code("Done\n```") is None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import tempfile
 import time
 from pathlib import Path
@@ -125,6 +126,26 @@ class Run:
             if problems:
                 raise ModelError("the sub-model did not return valid JSON for the schema: " + "; ".join(problems[:3]))
         return value
+
+    async def ask_batch(self, prompt: str, items: list[str], schema: dict | None) -> list[Any]:
+        """One sub-model call that answers ``prompt`` for several items at once.
+
+        Raises ``ModelError`` when the reply is not a well-formed list of the
+        right length; the caller then falls back to one call per item.
+        """
+        count = len(items)
+        text = prompts.batch_prompt(prompt, items)
+        if len(text) > self.ask_limit:
+            raise ValueError("batch too large")
+        wrapper = {"type": "array", "minItems": count, "maxItems": count, "items": schema or {}}
+        system = prompts.batch_system(count, schema)
+        reply = await self._complete(self.sub_model, system, text)
+        problems, value = _parse(reply.text, wrapper)
+        if problems:
+            raise ModelError("batched reply was not usable: " + "; ".join(problems[:2]))
+        if schema:
+            return list(value)
+        return [item.strip() if isinstance(item, str) else json.dumps(item, ensure_ascii=False) for item in value]
 
     async def _complete(self, model: Model, system: str, prompt: str) -> Reply:
         self.ledger.reserve(model.spec)

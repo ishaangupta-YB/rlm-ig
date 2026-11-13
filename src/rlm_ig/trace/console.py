@@ -146,7 +146,8 @@ class Console:
         style = {"ok": "green", "partial": "yellow"}.get(status, "red")
         mark = self._sym({"ok": "✔", "partial": "◐"}.get(status, "✗"), "*")
         dot = self._sym("·", "-")
-        self._print(f"{self._c(f'{mark} {status}', style, 'bold')}  {e['seconds']:.1f}s {dot} {e['usage_text']}")
+        usage = e["usage_text"] if self.unicode else e["usage_text"].replace("·", "-")
+        self._print(f"{self._c(f'{mark} {status}', style, 'bold')}  {e['seconds']:.1f}s {dot} {usage}")
         if e.get("error"):
             self._print(self._c(f"  {e['error']}", "red"))
         if e.get("note"):

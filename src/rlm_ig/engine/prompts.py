@@ -46,7 +46,7 @@ These are ordinary synchronous functions. Do not `await` them.
 
 1. Look first. Check the size and shape of `context` with `peek`, slices or `grep` before deciding on an approach. Never print all of a large value.
 2. Let code do what code does exactly and for free: counting, filtering, parsing, sorting, joining, arithmetic, exact matching.
-3. Use models for what needs reading: judging relevance, extracting meaning, summarising. Narrow the text with code first and send only the relevant part. Split anything large with `chunk` and fan out with `ask_map`.
+3. Use models for what needs reading: judging relevance, extracting meaning, summarising. Narrow the text with code first and send only the relevant part. Split anything large with `chunk` and fan out with `ask_map`. `ask_map` packs small items into shared calls on its own, so pass it the natural units (one record, one paragraph, one chunk) and let it do the batching.
 4. Sub-models and sub-agents know nothing about this conversation or your variables. Put everything they need into the call: the question, what the data is, and the exact form of answer you want. Ask for short, structured answers (pass `schema`) so you can combine them with code.
 5. Keep results in variables and build the answer from them. Check before trusting: print a sample, look for empty or failed entries (failed `*_map` items are falsy `Failed(...)` objects), and redo only the pieces that failed.
 6. Submit the variable that holds the answer, `submit(result)`, not a retyped copy of it. If the data does not contain the answer, say so in what you submit instead of guessing.
@@ -75,6 +75,31 @@ def ask_prompt(prompt: str, data: str | None) -> str:
     if data is None:
         return prompt
     return f"{prompt}\n\n<data>\n{data}\n</data>"
+
+
+BATCH_INTRO = """
+
+The request above applies separately to each of the {n} items below. Handle every item on its own; one item must not influence the answer for another.
+"""
+
+BATCH_JSON = """
+Reply with a single JSON array of exactly {n} elements and nothing else: no prose and no code fence. Element i is the answer for item i, in order.
+{each}"""
+
+
+def batch_system(n: int, schema: dict | None) -> str:
+    if schema:
+        each = "Every element must satisfy this JSON Schema:\n\n" + json.dumps(schema, indent=1)
+    else:
+        each = "Every element is a JSON string holding the answer for that item."
+    return ASK_SYSTEM + BATCH_JSON.format(n=n, each=each)
+
+
+def batch_prompt(prompt: str, items: list[str]) -> str:
+    parts = [prompt + BATCH_INTRO.format(n=len(items))]
+    for number, item in enumerate(items, 1):
+        parts.append(f'<item index="{number}">\n{item}\n</item>')
+    return "\n".join(parts)
 
 
 def ask_repair(reply: str, problems: list[str]) -> str:
@@ -145,8 +170,9 @@ def observation(text: str, *, step: int, steps: int, seconds: float, limit: int)
 
 def no_code(step: int, steps: int) -> str:
     return (
-        "No code block was found in your reply, so nothing ran. Reply with one ```python block. "
-        "If you already have the answer, call submit(answer) inside it.\n\n" + _footer(step, steps, 0.0)
+        "No code block was found in your reply, so nothing ran. Put the code in one fenced ```python block; "
+        "tool-call or XML syntax does not work here. If you already have the answer, call submit(answer) inside the block."
+        "\n\n" + _footer(step, steps, 0.0)
     )
 
 

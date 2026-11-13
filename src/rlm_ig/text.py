@@ -71,7 +71,35 @@ def extract_code(reply: str) -> str | None:
                 untagged.append(body)
         i = end + 1
     chosen = tagged or untagged
-    return "\n\n".join(chosen) if chosen else None
+    if chosen:
+        return "\n\n".join(chosen)
+    return _salvage(lines)
+
+
+_STRAY_TAG = re.compile(r"^\s*<[/\w][^>\n]*?(?:>|(?=\s))\s*")
+
+
+def _salvage(lines: list[str]) -> str | None:
+    """Recover code from a reply whose opening fence was mangled.
+
+    Models used to native tool calls sometimes open a block with a stray tag
+    (``<invoke ...``) instead of a fence, then close it with a normal fence.
+    If the reply has exactly one fence line, the longest run of lines directly
+    above it that parses as Python is taken to be the code.
+    """
+    fences = [i for i, line in enumerate(lines) if line.strip().startswith(("```", "~~~"))]
+    if len(fences) != 1 or fences[0] == 0:
+        return None
+    body = lines[: fences[0]]
+    for start in range(len(body)):
+        first = _STRAY_TAG.sub("", body[start], count=1)
+        candidate = "\n".join([first, *body[start + 1 :]]).strip("\n")
+        if not candidate.strip():
+            return None
+        # Require real code, not a stray word that happens to be an expression.
+        if _parses(candidate) and re.search(r"[=(.\[]|^\s*(import|from|def|for|if|print)\b", candidate, re.M):
+            return candidate
+    return None
 
 
 def first_line(text: str, width: int = 100) -> str:

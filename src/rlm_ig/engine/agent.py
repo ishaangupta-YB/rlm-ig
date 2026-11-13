@@ -236,11 +236,67 @@ class Agent:
             return {"ok": False, "etype": etype, "error": text}
 
     async def _ask_map(self, jobs: list[dict], schema: dict | None) -> tuple[list, dict[str, str]]:
-        results = await asyncio.gather(
-            *(self.run.ask(job.get("prompt", ""), job.get("data"), schema) for job in jobs),
-            return_exceptions=True,
-        )
+        results: list[Any] = [None] * len(jobs)
+
+        async def serve(indices: list[int]) -> None:
+            if len(indices) > 1:
+                try:
+                    values = await self.run.ask_batch(
+                        jobs[indices[0]]["prompt"], [jobs[i]["data"] for i in indices], schema
+                    )
+                except BudgetExceeded as exc:
+                    for i in indices:
+                        results[i] = exc
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    pass  # the batched call was unusable: ask for each item separately
+                else:
+                    for i, value in zip(indices, values, strict=True):
+                        results[i] = value
+                    return
+            answers = await asyncio.gather(
+                *(self.run.ask(jobs[i].get("prompt", ""), jobs[i].get("data"), schema) for i in indices),
+                return_exceptions=True,
+            )
+            for i, answer in zip(indices, answers, strict=True):
+                results[i] = answer
+
+        await asyncio.gather(*(serve(group) for group in self._batches(jobs)))
         return self._collect(results)
+
+    def _batches(self, jobs: list[dict]) -> list[list[int]]:
+        """Group ``ask_map`` jobs so that small items share a sub-model call.
+
+        Only the ``ask_map(prompt, items)`` form is grouped (one prompt, every
+        job carrying data). An item that is large on its own keeps a call to
+        itself, so batching never dilutes attention on substantial inputs.
+        """
+        cfg = self.run.config
+        prompt = jobs[0].get("prompt") if jobs else None
+        if cfg.ask_batch <= 1 or len(jobs) < 2 or any(j.get("data") is None or j.get("prompt") != prompt for j in jobs):
+            return [[i] for i in range(len(jobs))]
+        budget = min(cfg.ask_batch_chars, max(1, self.run.ask_limit - len(prompt or "") - 2000))
+        groups: list[list[int]] = []
+        current: list[int] = []
+        used = 0
+        for i, job in enumerate(jobs):
+            size = len(job["data"]) + 40
+            if size > budget // 2:
+                if current:
+                    groups.append(current)
+                    current, used = [], 0
+                groups.append([i])
+                continue
+            if current and (len(current) >= cfg.ask_batch or used + size > budget):
+                groups.append(current)
+                current, used = [], 0
+            current.append(i)
+            used += size
+        if current:
+            groups.append(current)
+        return groups
 
     def _collect(self, results: list) -> tuple[list, dict[str, str]]:
         values: list = []

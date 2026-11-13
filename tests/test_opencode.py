@@ -133,6 +133,45 @@ def test_upstream_errors_surface_as_model_errors(upstream):
             run_async(go())
 
 
+def test_log_lines_reporting_a_failed_request_are_recognised():
+    from rlm_ig.models.opencode import is_hopeless, log_error
+
+    line = (
+        b'timestamp=2026-01-01T00:00:00Z level=ERROR run=1 message="stream error" providerID=x modelID=y '
+        b'session.id=ses_abc small=false agent=rlm error.error="AI_APICallError: Free usage limit reached. Subscribe."'
+    )
+    assert log_error(line) == ("ses_abc", "AI_APICallError: Free usage limit reached. Subscribe.")
+    assert log_error(b"level=INFO message=started session.id=ses_abc") is None
+    assert is_hopeless("Free usage limit reached") and is_hopeless("Invalid API key")
+    assert not is_hopeless("Overloaded, please retry")
+
+
+@needs_opencode
+@pytest.mark.parametrize("mode", ["server", "run"])
+def test_an_error_opencode_keeps_retrying_is_surfaced_quickly(upstream, mode):
+    import time
+
+    from fakes.openai_server import HTTPStatus
+
+    def reply(body):
+        # A rate limit with a long retry delay: opencode waits and retries by itself.
+        raise HTTPStatus(429, "Free usage limit reached for this model", {"retry-after": "3600"})
+
+    with upstream(reply):
+        model = OpenCode(model="mock/m1", settings={"mode": mode})
+
+        async def go():
+            try:
+                return await model.complete("s", "hi")
+            finally:
+                await model.close()
+
+        started = time.monotonic()
+        with pytest.raises(rlm.ModelError, match="Free usage limit reached"):
+            run_async(go())
+        assert time.monotonic() - started < 30
+
+
 def test_spec_strings_resolve_to_this_backend(cfg):
     from rlm_ig.models import resolve
 

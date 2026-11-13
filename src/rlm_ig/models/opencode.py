@@ -47,6 +47,38 @@ _LISTENING = re.compile(rb"listening on (https?://[^\s]+)")
 _NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+# opencode retries a failed upstream request on its own, sometimes for a very
+# long time (a quota error can carry a retry delay of hours), and says so only
+# in its log. With logging on, a line like this is the one visible sign:
+#   level=ERROR ... message="stream error" ... session.id=ses_x ... error.error="AI_APICallError: ..."
+_LOG_ERROR = re.compile(rb'level=ERROR.*?session\.id=(\S+).*?error\.error="((?:[^"\\]|\\.)*)"')
+# Errors no amount of retrying will fix: fail at once instead of waiting.
+_HOPELESS = (
+    "limit reached",
+    "quota",
+    "unauthorized",
+    "api key",
+    "authenticat",
+    "credit",
+    "billing",
+    "forbidden",
+    "not found",
+)
+
+
+def log_error(line: bytes) -> tuple[str, str] | None:
+    """``(session id, message)`` when a log line reports a failed model request."""
+    found = _LOG_ERROR.search(line)
+    if not found:
+        return None
+    return found.group(1).decode("utf-8", "replace"), found.group(2).decode("utf-8", "replace")
+
+
+def is_hopeless(message: str) -> bool:
+    lowered = message.lower()
+    return any(word in lowered for word in _HOPELESS)
+
+
 def project_config(prompt: str) -> dict[str, Any]:
     """The opencode.json written into the throwaway working directory."""
     deny_all = {"*": "deny"}
@@ -86,6 +118,9 @@ class OpenCode(Model):
         self.turn_timeout = float(settings.get("timeout", 600))
         self.start_timeout = float(settings.get("start_timeout", 45))
         self.retries = int(settings.get("retries", 1))
+        #: seconds opencode may keep retrying a failing request on its own
+        #: before the turn is given up (quota and auth errors fail at once)
+        self.error_grace = float(settings.get("error_grace", 30))
         self.window_chars = int(settings.get("window_chars", self.window_chars))
         self.parallel = int(settings.get("parallel", self.parallel))
         self.info: dict[str, Any] = {}
@@ -168,12 +203,17 @@ class _Server:
         self.dir = tempfile.mkdtemp(prefix="rlm-opencode-")
         self._proc: asyncio.subprocess.Process | None = None
         self._log = b""
+        #: session id -> (message, time first seen) for requests opencode is retrying
+        self.errors: dict[str, tuple[str, float]] = {}
         self._pump: asyncio.Task | None = None
 
     async def start(self) -> None:
         with open(os.path.join(self.dir, "opencode.json"), "w", encoding="utf-8") as handle:
             json.dump(project_config(PREFACE), handle)
-        argv = [self.model.executable(), "serve", "--hostname", "127.0.0.1", "--port", "0", *self.model.extra_args]
+        argv = [
+            self.model.executable(), "serve", "--hostname", "127.0.0.1", "--port", "0",
+            "--print-logs", "--log-level", "ERROR", *self.model.extra_args,
+        ]  # fmt: skip
         env = self.model.environment(self.dir)
         env["OPENCODE_SERVER_PASSWORD"] = self.password
         try:
@@ -210,12 +250,16 @@ class _Server:
 
     async def _drain(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
+        loop = asyncio.get_running_loop()
         with contextlib.suppress(Exception):
             while True:
-                chunk = await self._proc.stdout.read(4096)
-                if not chunk:
+                line = await self._proc.stdout.readline()
+                if not line:
                     return
-                self._log = (self._log + chunk)[-4000:]
+                self._log = (self._log + line)[-4000:]
+                found = log_error(line)
+                if found:
+                    self.errors.setdefault(found[0], (found[1], loop.time()))
 
     def request(self, method: str, path: str, body: Any = None, timeout: float = 60) -> Any:
         """Blocking JSON request; call it through the model's thread pool."""
@@ -303,7 +347,25 @@ class _OpenCodeChat(Chat):
         ref = self.model.model_ref()
         if ref:
             body["model"] = ref
-        out = await server.call("POST", f"/session/{self._session}/message", body, timeout=self.model.turn_timeout)
+        server.errors.pop(self._session, None)
+        path = f"/session/{self._session}/message"
+        call = asyncio.ensure_future(server.call("POST", path, body, timeout=self.model.turn_timeout))
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                done, _ = await asyncio.wait({call}, timeout=0.5)
+                if done:
+                    break
+                problem = server.errors.get(self._session)
+                if problem and (is_hopeless(problem[0]) or loop.time() - problem[1] > self.model.error_grace):
+                    # opencode is still retrying behind the request; stop it and say why.
+                    with contextlib.suppress(Exception):
+                        await server.call("POST", f"/session/{self._session}/abort", timeout=10)
+                    _raise_for(problem[0])
+        finally:
+            if not call.done():
+                call.cancel()
+        out = call.result()
         info = (out or {}).get("info") or {}
         _raise_for(info.get("error"))
         text = "".join(p.get("text", "") for p in (out or {}).get("parts") or [] if p.get("type") == "text")
@@ -319,6 +381,7 @@ class _OpenCodeChat(Chat):
             with open(os.path.join(self._dir, "opencode.json"), "w", encoding="utf-8") as handle:
                 json.dump(project_config(self.system), handle)
         argv = [self.model.executable(), "run", "--format", "json", "--pure", "--agent", AGENT, "--title", "rlm"]
+        argv += ["--print-logs", "--log-level", "ERROR"]
         if self.model.model_name:
             argv += ["-m", self.model.model_name]
         if self._session:
@@ -337,14 +400,51 @@ class _OpenCodeChat(Chat):
         except OSError as exc:
             raise ModelError(f"could not start opencode: {exc}") from exc
         procs.track(proc.pid, group=True)
+        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.model.turn_timeout
+        problem: tuple[str, float] | None = None
+        log: list[bytes] = []
+
+        async def watch() -> None:
+            nonlocal problem
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    return
+                log.append(line)
+                found = log_error(line)
+                if found and problem is None:
+                    problem = (found[1], loop.time())
+
+        watcher = asyncio.ensure_future(watch())
+        reader = asyncio.ensure_future(proc.stdout.read())
         try:
-            out, err = await asyncio.wait_for(proc.communicate(payload.encode("utf-8")), self.model.turn_timeout)
-        except TimeoutError:
-            raise ModelError(f"opencode did not answer within {self.model.turn_timeout:g}s", retryable=True) from None
+            proc.stdin.write(payload.encode("utf-8"))
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                await proc.stdin.drain()
+            proc.stdin.close()
+            while True:
+                done, _ = await asyncio.wait({reader}, timeout=0.5)
+                if done:
+                    break
+                if problem and (is_hopeless(problem[0]) or loop.time() - problem[1] > self.model.error_grace):
+                    _raise_for(problem[0])
+                if loop.time() > deadline:
+                    raise ModelError(f"opencode did not answer within {self.model.turn_timeout:g}s", retryable=True)
+            out = reader.result()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), 5)
         finally:
-            # Covers a timeout, a cancelled run, and any child the launcher left.
+            # Covers an error, a timeout, a cancelled run, and any child the launcher left.
             procs.kill(proc.pid, group=True)
             procs.untrack(proc.pid)
+            for task in (reader, watcher):
+                if not task.done():
+                    task.cancel()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), 3)
+        err = b"".join(log)
         texts: list[str] = []
         usage = Usage()
         for line in out.decode("utf-8", "replace").splitlines():

@@ -318,7 +318,7 @@ For real isolation, wrap the worker with `sandbox.launcher` (a container or jail
 
 ```bash
 pip install -e ".[dev]"
-pytest                      # 437 tests, about 2 minutes, no network or credentials
+pytest                      # 440 tests, about 2 minutes, no network or credentials
 ruff check src tests
 ```
 
@@ -338,7 +338,7 @@ Stated plainly, so you know what has and has not been proven:
 
 - Developed and tested on Linux with Python 3.11 and 3.13. macOS should behave the same. Native Windows is untested; use WSL.
 - **Claude Code** was tested live, extensively (Claude Code 2.1.x).
-- **opencode** was tested by driving the real binary (1.19.x) in both server and run modes against a local model endpoint. It was not run against a hosted provider in the development environment.
+- **opencode** was tested by driving the real binary (1.19.x) in both server and run modes against a local model endpoint. Against opencode's hosted free models the development environment only got as far as their rate limit ("Free usage limit reached"), which rlm-ig reported correctly within seconds; a full run on a hosted provider through opencode has not been done.
 - The **Anthropic** and **OpenAI-compatible** backends were tested against local servers that implement the wire formats, not against the live services.
 - The **MCP client** was tested against conformance fakes for both transports, not against third-party servers.
 - The `sandbox.launcher` mechanism is tested; the Docker command line in the docs is an example that was not run.

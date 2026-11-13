@@ -168,10 +168,13 @@ Put these in `[providers.opencode]`:
 | `timeout` | `600` | Seconds a turn may take. |
 | `start_timeout` | `45` | Seconds to wait for the server to come up. |
 | `retries` | `1` | Retries after a retryable failure (a timeout or a connection error). The new session replays the transcript. |
+| `error_grace` | `30` | Seconds opencode may keep retrying a failing upstream request by itself before the turn is given up. Quota, billing and authentication errors fail immediately. |
 | `window_chars` | `400000` | Largest `ask` input. |
 | `parallel` | `4` | Default simultaneous requests. |
 
 The process gets your environment. Billing is whatever your opencode sign-in uses. Errors that mention credentials include a hint to run `opencode auth list` and `opencode auth login`.
+
+opencode retries a failed upstream request on its own and reports it only in its log, sometimes for a long time (a quota error can carry a retry delay of hours). rlm-ig runs it with error logging on and watches for those lines, so a quota or credential problem ends the turn within seconds with the provider's message instead of looking like a hang.
 
 ## Anthropic API
 

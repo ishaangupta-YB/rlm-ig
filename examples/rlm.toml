@@ -1,0 +1,37 @@
+# Example project configuration. Copy to the root of your project as rlm.toml.
+# Every key is optional; see docs/configuration.md for the full list.
+
+model = "claude-code:sonnet"        # root agent
+sub_model = "claude-code:haiku"     # ask() calls and sub-agents
+
+max_usd = 2.00                      # stop spending here
+max_calls = 300                     # model calls, all agents combined
+max_steps = 20                      # turns per agent
+max_depth = 2                       # levels of sub-agents
+# timeout = 900                     # wall-clock seconds for a run
+
+[sandbox]
+cell_timeout = 120                  # seconds a cell may compute
+# pass_env = ["DATABASE_URL"]       # environment variables model code may see
+# memory_mb = 4096
+
+# Settings for a built-in backend:
+[providers.claude-code]
+# effort = "low"
+# strip_api_key = true              # ignore ANTHROPIC_API_KEY, use the subscription login
+
+# A custom OpenAI-compatible endpoint, selected with model = "lab:<model-id>":
+# [providers.lab]
+# kind = "openai"
+# base_url = "http://localhost:8000/v1"
+# api_key_env = "LAB_API_KEY"
+
+# Estimate cost for a model that only reports tokens (USD per million):
+# [pricing."my-model"]
+# input = 0.50
+# output = 1.50
+
+# MCP servers; each tool appears in the REPL as <server>_<tool>(...):
+# [mcp.files]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]

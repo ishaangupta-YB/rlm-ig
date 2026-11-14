@@ -95,6 +95,8 @@ The value of the last expression is shown with a compact `repr`: long lists show
 
 The engine takes the fenced block tagged `python` (also `py`, `python3`, `repl`, `ipython`, `pycon`). If a reply has several tagged blocks they are joined in order. If none is tagged, untagged blocks that parse as Python are used. An unterminated final block is kept, because a cut-off reply is common. As a last resort, if a reply has exactly one closing fence and the lines above it parse as Python once a stray opening tag (such as `<invoke ...`, left over from native tool-call habits) is stripped, that code is used.
 
+When the code taken this way does not compile, the engine tries a repair before running it. It removes lines that hold nothing but a markup tag, such as a stray `</parameter>` from native tool-call habits, and it ends an unclosed block at the next fence, dropping a short prose paragraph that sits just before it. A repair is used only if the result compiles; otherwise the code runs as it was and the model sees the real `SyntaxError`. Each repair is recorded as a `note` event, so it shows in `rlm trace`.
+
 A reply with no usable block gets a message saying nothing ran, and the turn is spent. If the model answers in prose twice in a row, the engine accepts the latest prose as the answer and records a `note` event. Prose is never accepted when you gave a `schema`.
 
 If the cell raises, the model sees the traceback and the variables are intact. If `submit(value)` is called with a value that fails the schema, the model gets the validation errors and can submit again.

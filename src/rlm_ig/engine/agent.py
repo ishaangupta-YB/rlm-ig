@@ -11,7 +11,7 @@ from ..errors import BudgetExceeded, DelegationRefused, RlmError, StepsExhausted
 from ..models.base import Chat, Model
 from ..sandbox import Sandbox, encode
 from ..schema import validate
-from ..text import clip_middle, extract_code, first_line
+from ..text import clip_middle, extract_code_with_repairs, first_line
 from ..tools import Toolbox
 from . import prompts
 from .run import Run
@@ -151,7 +151,11 @@ class Agent:
                 reply = await self.run.turn(chat, self.model, message, agent=self.id, depth=self.depth, step=step)
             self.steps = step
 
-            code = extract_code(reply.text)
+            code, repairs = extract_code_with_repairs(reply.text)
+            if repairs:
+                self.run.events.emit(
+                    "note", self.id, self.depth, message=f"repaired the code block: {', '.join(repairs)}"
+                )
             if code is None:
                 prose_replies += 1
                 last_prose = reply.text.strip() or last_prose

@@ -26,6 +26,9 @@ Planned as 0.2.0.
 
 ### Fixed
 
+- Replies with stray tool-call markup (such as `</parameter>`) or an unclosed code
+  block followed by prose are repaired before running, instead of failing with a
+  SyntaxError and costing a turn. Repairs are reported as a `note` in the trace.
 - `result.parsed` builds nested dataclasses: fields typed `list[X]`,
   `tuple[X, ...]`, `dict[str, X]` or `X | None` hold `X` instances.
 - `rlm doctor` checks the configured sandbox (and honours `--config`) instead

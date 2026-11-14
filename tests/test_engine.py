@@ -93,6 +93,19 @@ def test_prose_is_never_accepted_when_a_schema_is_required(solve, cfg):
     assert result.status == "failed" and "StepsExhausted" in result.error
 
 
+def test_a_mangled_reply_is_repaired_runs_in_one_step_and_is_noted(solve):
+    from test_text_schema import MANGLED_REPLY
+
+    events = []
+    result = solve([MANGLED_REPLY], context="a\nb\na", on_event=events.append)
+    assert result.status == "ok" and result.steps == 1
+    assert result.answer == [["a", 2], ["b", 1]]
+    notes = [e["message"] for e in events if e.kind == "note"]
+    assert any(note.startswith("repaired the code block") for note in notes), notes
+    trace = [e for e in read_trace(result.trace) if e["kind"] == "note"]
+    assert any(e["message"].startswith("repaired the code block") for e in trace)
+
+
 # ------------------------------------------------------------------- limits
 
 

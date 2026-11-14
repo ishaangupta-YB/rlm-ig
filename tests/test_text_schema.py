@@ -7,7 +7,7 @@ import pytest
 
 from rlm_ig.errors import SchemaError
 from rlm_ig.schema import parse_json_reply, to_schema, validate
-from rlm_ig.text import clip_middle, extract_code
+from rlm_ig.text import clip_middle, extract_code, extract_code_with_repairs
 
 # ------------------------------------------------------------- extract_code
 
@@ -58,6 +58,106 @@ def test_clip_middle_keeps_both_ends():
     assert clipped.startswith("A" * 60) and clipped.endswith("B" * 40)
     assert "900 characters omitted" in clipped
     assert clip_middle("short", 100) == "short"
+
+
+# ------------------------------------------------- repairing mangled replies
+
+# A reply seen live from a small model: stray tool-call markup before the
+# closing fence, and an unclosed block followed by prose and another block.
+MANGLED_REPLY = (
+    "I'll count the failed passwords per IP.\n"
+    "```python\n"
+    "lines = context.splitlines()\n"
+    "print(len(lines))\n"
+    "</parameter>\n"
+    "```\n"
+    "\n"
+    "Now the counts:\n"
+    "```python\n"
+    "from collections import Counter\n"
+    "top = Counter(lines).most_common(5)\n"
+    "</parameter>\n"
+    "\n"
+    "Now I'll submit the answer:\n"
+    "```python\n"
+    "submit(top)\n"
+    "</parameter>"
+)
+REPAIRED = "lines = context.splitlines()\nprint(len(lines))\n\nfrom collections import Counter\ntop = Counter(lines).most_common(5)\n\nsubmit(top)"
+
+
+def test_mangled_reply_is_repaired_and_the_repairs_are_reported():
+    code, repairs = extract_code_with_repairs(MANGLED_REPLY)
+    assert code == REPAIRED
+    assert extract_code(MANGLED_REPLY) == REPAIRED
+    text = ", ".join(repairs)
+    assert "removed 3 stray markup lines" in text and "dropped prose after an unclosed block" in text
+
+
+def test_unclosed_block_before_a_closed_one_is_repaired_too():
+    # the same reply, but the last block is closed: its fence must not count as the earlier block's closer
+    code, repairs = extract_code_with_repairs(MANGLED_REPLY + "\n```")
+    assert code == REPAIRED and repairs
+
+
+def test_a_genuine_syntax_error_is_left_alone():
+    assert extract_code("```python\nx = (1,\nprint(x)\n```") == "x = (1,\nprint(x)"
+    assert extract_code_with_repairs("```python\nx = (1,\nprint(x)\n```") == ("x = (1,\nprint(x)", [])
+
+
+def test_a_tag_line_inside_a_string_is_never_stripped():
+    reply = '```python\nhtml = """\n</parameter>\n"""\nprint(html)\n```'
+    code, repairs = extract_code_with_repairs(reply)
+    assert code == 'html = """\n</parameter>\n"""\nprint(html)' and repairs == []
+
+
+def test_stray_markup_in_a_terminated_block_is_removed():
+    code, repairs = extract_code_with_repairs("```python\nx = 1\nprint(x)\n</parameter>\n```")
+    assert code == "x = 1\nprint(x)" and repairs == ["removed 1 stray markup line"]
+
+
+@pytest.mark.parametrize(
+    "markup", ["</parameter>", "</invoke>", '<parameter name="code">', "</function_calls>", "  <br/>  "]
+)
+def test_every_kind_of_lone_markup_line_is_removed(markup):
+    assert extract_code(f"```python\n{markup}\nx = 1\n{markup}\n```") == "x = 1"
+
+
+@pytest.mark.parametrize(
+    ("reply", "today"),
+    [
+        # unterminated, runs to the end of the reply
+        ("```python\nx = 1\n\ny = (", "x = 1\n\ny = ("),
+        # cut at a following fence, but `y = (` is code, not prose
+        ("```python\nx = 1\n\ny = (\n```python\nz = 2\n```", "x = 1\n\ny = (\n```python\nz = 2"),
+        # a terminated block is never paragraph-trimmed
+        ("```python\nx = 1\n\nNow I'll go:\n```", "x = 1\n\nNow I'll go:"),
+    ],
+)
+def test_broken_code_in_a_last_paragraph_is_never_dropped(reply, today):
+    assert extract_code_with_repairs(reply) == (today, [])
+    assert extract_code(reply) == today
+
+
+def test_prose_is_dropped_only_when_it_looks_like_prose():
+    # more than three lines, an indented line, or code characters: not prose, so no repair
+    for paragraph in ("One.\nTwo.\nThree.\nFour.", "Now:\n  indented", "Then call f() on it:"):
+        reply = f"```python\nx = 1\n\n{paragraph}\n```python\nprint(x)\n```"
+        code, repairs = extract_code_with_repairs(reply)
+        assert repairs == [] and paragraph in code
+    code, repairs = extract_code_with_repairs("```python\nx = 1\n\nNext I'll print it.\n```python\nprint(x)\n```")
+    assert code == "x = 1\n\nprint(x)" and repairs == ["dropped prose after an unclosed block"]
+
+
+def test_valid_replies_never_report_repairs():
+    for reply in (
+        "```python\nprint(1)\n```",
+        "```python\na = 1\n```\ntext\n```py\nb = 2\n```",
+        "ok\n```python\nprint('cut off')",
+        "The answer is 42.",
+        'Plan.\n\n<invoke name="python">\nx = 1\nprint(x)\n```',
+    ):
+        assert extract_code_with_repairs(reply) == (extract_code(reply), [])
 
 
 # ------------------------------------------------------------------ schemas

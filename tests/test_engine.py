@@ -132,8 +132,11 @@ def test_cost_budget_is_enforced(solve, cfg):
 
 
 def test_wall_clock_limit(solve, cfg):
-    model = Scripted([block("import time\ntime.sleep(0.4)"), block("submit('late')")])
-    result = solve(model, config=cfg.replace(timeout=0.2))
+    # The limit counts from the start of the run, worker start-up included, so
+    # it must comfortably outlast a slow start (macOS CI runners) and expire
+    # during the first cell, leaving the second turn as the forced wrap-up.
+    model = Scripted([block("import time\ntime.sleep(2.5)"), block("submit('late')")])
+    result = solve(model, config=cfg.replace(timeout=1.5))
     assert result.status == "partial" and "time limit" in result.note
 
 

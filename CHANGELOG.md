@@ -19,6 +19,7 @@ First public release.
 - Schema-validated answers, tools, MCP client, sessions.
 - The `rlm` command with `run`, `doctor`, `trace` and `demo`; JSONL traces
   with terminal and HTML viewers.
+- A step-by-step guide with worked examples on public Loghub datasets.
 
 [Unreleased]: https://github.com/ishaangupta-yb/rlm-ig/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/ishaangupta-yb/rlm-ig/releases/tag/v0.1.0

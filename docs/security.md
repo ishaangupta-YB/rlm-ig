@@ -111,7 +111,7 @@ result = rlm.run(
 )
 ```
 
-**The launcher mechanism is tested** in our test suite, with a stand-in launcher. **This particular Docker command line is an example. It was not run in our test environment.** Check it on your machine before you rely on it, and read Docker's documentation for the flags you add. A stricter variant that you might start from, equally untested here:
+**The launcher mechanism is tested** in our test suite with a stand-in launcher. Both Docker command lines on this page were also run by hand with Docker 29: the model's code ran in the container, could not reach the network, `ask_map` and `submit` worked through the pipe, and a cell that ran past `cell_timeout` got its container killed and replaced, with no container left behind. The plain one also ran with the `python:3.8-slim` and `python:3.9-slim` images. Podman and other runtimes have not been tried. The stricter variant, which also runs as an unprivileged user with a read-only filesystem:
 
 ```toml
 [sandbox]
@@ -120,7 +120,9 @@ launcher = [
   "--network", "none",
   "--read-only", "--tmpfs", "/tmp",
   "--cap-drop", "ALL",
+  "--security-opt", "no-new-privileges",
   "--memory", "1g", "--pids-limit", "256",
+  "--user", "65534:65534",
   "python:3.12-slim",
 ]
 ```
@@ -128,7 +130,7 @@ launcher = [
 What to know when you use a launcher:
 
 - **`-i` is required** so the container's stdin stays open. Without it the worker never receives its source.
-- **The image needs `python3`.** The worker source is written to stick to syntax and idioms that work on Python 3.8 and later, so that it can run under an interpreter older than yours. That is a design goal, and we have not tested it against old interpreters. To use another interpreter path in the image, set `sandbox.python`. Libraries the model's code imports must be in the image.
+- **The image needs `python3`.** The worker source sticks to syntax and idioms that work on Python 3.8 and later, so that it can run under an interpreter older than yours. It was run with the 3.8, 3.9 and 3.12 slim images; the test suite does not cover old interpreters. To use another interpreter path in the image, set `sandbox.python`. Libraries the model's code imports must be in the image.
 - **`--network none` blocks the model's code from the network.** If your task needs a package index or an API from inside the REPL, you need a different setup. Data does not need to be mounted, because `context` and tool results arrive over the pipe.
 - **Cells cannot be interrupted.** rlm-ig stops a runaway cell with `SIGINT`, which it cannot deliver through a launcher. Under a launcher, a cell that passes `cell_timeout` gets the worker killed and restarted, and the variables it held are gone. The model is told.
 - **The scrubbed environment applies to the launcher process too.** If your launcher needs variables, such as `DOCKER_HOST`, list them in `pass_env`. They reach `docker`, not the container, unless you forward them with the launcher's own flags.

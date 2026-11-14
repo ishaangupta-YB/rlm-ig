@@ -23,6 +23,7 @@ print(result.answer)
 - [Why this exists](#why-this-exists)
 - [Install](#install)
 - [First five minutes](#first-five-minutes)
+- [A real run on public data](#a-real-run-on-public-data)
 - [How a run works](#how-a-run-works)
 - [Backends](#backends)
 - [Python API](#python-api)
@@ -34,12 +35,14 @@ print(result.answer)
 - [Testing](#testing)
 - [Known limits](#known-limits)
 - [Documentation](#documentation)
+- [Contributing and releases](#contributing-and-releases)
+- [Credits and citation](#credits-and-citation)
 
 ## Why this exists
 
 A model given a 2 MB log either cannot fit it or reads it badly. A model given a REPL that holds the log can do what a person would: check its shape, grep, count, read the three places that matter, and hand the bulk classification work to something cheaper.
 
-This approach is known as a recursive language model (introduced in research by Zhang, Kraska and Khattab at MIT, 2025). rlm-ig is an engine for it built around a few decisions:
+This approach is known as a recursive language model (introduced by Zhang, Kraska and Khattab at MIT in [arXiv:2512.24601](https://arxiv.org/abs/2512.24601)). rlm-ig is an engine for it built around a few decisions:
 
 - **A real Python process, not a toy interpreter.** The REPL is a native subprocess that starts in about 50 ms, has the whole standard library and whatever packages you have installed, and keeps its state across turns. A runaway cell is interrupted without losing variables; a crashed worker is replaced.
 - **Coding agents as first-class backends.** One long-lived Claude Code process (or one opencode server session) per agent, so each turn sends only the new message and reuses the prompt cache. Their own tools are switched off: every computation happens in the REPL, where you can see it.
@@ -50,19 +53,28 @@ This approach is known as a recursive language model (introduced in research by 
 
 ## Install
 
-Requires Python 3.11 or newer. The core has no dependencies.
+Requires Python 3.11 or newer on Linux or macOS (Windows through WSL). The core has no third-party dependencies.
+
+**From PyPI** (recommended). Use a virtual environment, or `pipx` / `uv tool` to get the `rlm` command on its own:
 
 ```bash
-pip install rlm-ig                 # Claude Code, opencode, OpenAI-compatible APIs
+pip install rlm-ig                 # Claude Code, opencode, OpenAI-compatible APIs, Ollama
 pip install "rlm-ig[anthropic]"    # adds the Anthropic API backend (official SDK)
+pipx install rlm-ig                # or: uv tool install rlm-ig
 ```
 
-From a checkout:
+**From a clone**, to read the code, run the tests or change something:
 
 ```bash
-git clone https://github.com/ishaangupta-yb/rlm-ig && cd rlm-ig
+git clone https://github.com/ishaangupta-yb/rlm-ig.git
+cd rlm-ig
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+**Check it worked:** `rlm --version` prints the version, and `rlm demo` runs a full example with no model and no credentials.
+
+**With Docker.** rlm-ig can already run the model's code inside a container while it runs on your machine; see [Security](https://github.com/ishaangupta-yb/rlm-ig/blob/main/README.md#security) and the [guide](https://github.com/ishaangupta-yb/rlm-ig/blob/main/GUIDE.md#9-run-model-code-in-a-docker-container). A ready-made image for running the whole tool in Docker is not published yet.
 
 You also need at least one model backend:
 
@@ -121,6 +133,29 @@ rlm "What changed between v1 and v2 of the pricing rules?" -f contracts/
 cat access.log | rlm "Which IPs look like scanners? Top 10 with evidence." --max-usd 0.50
 rlm trace            # replay the last run step by step
 ```
+
+## A real run on public data
+
+This uses `OpenSSH_2k.log` from [Loghub](https://github.com/logpai/loghub), a public collection of real system logs (see [Credits](#credits-and-citation)). It is 2,000 lines from a real SSH server under attack.
+
+```bash
+curl -LO https://raw.githubusercontent.com/logpai/loghub/master/OpenSSH/OpenSSH_2k.log
+rlm "Which 5 IP addresses have the most failed password attempts? Give each IP with its count." \
+    -f OpenSSH_2k.log -m claude-code:haiku --max-usd 0.50
+```
+
+Output from a real run (Claude Code 2.1.325, Claude Haiku):
+
+```text
+183.62.140.253: 286
+187.141.143.180: 80
+103.99.0.122: 46
+112.95.230.3: 26
+5.188.10.180: 18
+✔ ok  5.9s · 3 calls · 11k in (6.8k cached) / 665 out · $0.0013
+```
+
+All five counts match `grep "Failed password" OpenSSH_2k.log | grep -o 'from [0-9.]*' | sort | uniq -c | sort -rn`. The model counted with code instead of reading the 2,000 lines. More worked examples, each with its dataset, are in the [guide](https://github.com/ishaangupta-yb/rlm-ig/blob/main/GUIDE.md).
 
 ## How a run works
 
@@ -312,7 +347,17 @@ The REPL worker is an ordinary subprocess running as you. **It is not a security
 - The host only ever parses JSON from a worker. It never unpickles anything a worker produced.
 - Claude Code and opencode run with their own tools disabled, in a temporary directory.
 
-For real isolation, wrap the worker with `sandbox.launcher` (a container or jail). The worker's source is shipped over stdin, so nothing needs to be mounted. See [docs/security.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/security.md), including the note on prompt injection from the data you load.
+For real isolation, wrap the worker with `sandbox.launcher` (a container or jail). The worker's source is shipped over stdin, so nothing needs to be mounted or installed in the image. This Docker setup was checked end to end with Docker 29, including a cell that ran past its time limit:
+
+```toml
+# rlm.toml
+[sandbox]
+launcher = ["docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--tmpfs", "/tmp",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "1g",
+            "--pids-limit", "256", "--user", "65534:65534", "python:3.12-slim"]
+```
+
+The model's code then cannot reach the network or your files, while `ask`, `delegate` and your tools still work, because they run on the host. See [docs/security.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/security.md), including the note on prompt injection from the data you load.
 
 ## Testing
 
@@ -341,15 +386,32 @@ Stated plainly, so you know what has and has not been proven:
 - **opencode** was tested by driving the real binary (1.19.x) in both server and run modes against a local model endpoint. Against opencode's hosted free models the development environment only got as far as their rate limit ("Free usage limit reached"), which rlm-ig reported correctly within seconds; a full run on a hosted provider through opencode has not been done.
 - The **Anthropic** and **OpenAI-compatible** backends were tested against local servers that implement the wire formats, not against the live services.
 - The **MCP client** was tested against conformance fakes for both transports, not against third-party servers.
-- The `sandbox.launcher` mechanism is tested; the Docker command line in the docs is an example that was not run.
+- The Docker `sandbox.launcher` setup shown above was run with Docker 29 and the `python:3.8-slim`, `python:3.9-slim` and `python:3.12-slim` images. Podman and other runtimes have not been tried.
+- `result.parsed` builds your dataclass with `Cls(**answer)`, so a dataclass nested inside another one stays a plain dict. Use a Pydantic model if you need nested objects built for you.
 - A sub-agent cannot see its parent's variables. Everything it needs has to be passed in the call.
 - Sessions save picklable variables and REPL-defined functions. Open files, locks, generators and the like are skipped and reported.
 
 ## Documentation
 
-The guide is in [docs/](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/README.md):
+Start with the **[step-by-step guide](https://github.com/ishaangupta-yb/rlm-ig/blob/main/GUIDE.md)**: install, backends, real use cases on public datasets, Docker isolation, cost control and troubleshooting.
+
+The reference is in [docs/](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/README.md):
 
 [Quickstart](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/quickstart.md) · [Concepts](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/concepts.md) · [REPL reference](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/repl-api.md) · [Backends](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/backends.md) · [Configuration](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/configuration.md) · [Python API](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/python-api.md) · [Tools and MCP](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/tools-and-mcp.md) · [Sessions](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/sessions.md) · [Tracing](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/tracing.md) · [Security](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/security.md) · [Troubleshooting](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/troubleshooting.md)
+
+## Contributing and releases
+
+Issues and pull requests are welcome at [github.com/ishaangupta-yb/rlm-ig](https://github.com/ishaangupta-yb/rlm-ig). Run `ruff check .` and `pytest` before opening a pull request; CI runs both on Python 3.11 to 3.13 and on macOS. Releases are published to PyPI from GitHub Actions with Trusted Publishing, so no upload token exists. The process is in [RELEASING.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/RELEASING.md) and changes are listed in [CHANGELOG.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/CHANGELOG.md).
+
+## Credits and citation
+
+The recursive language model idea comes from:
+
+> Alex L. Zhang, Tim Kraska, Omar Khattab. *Recursive Language Models*. arXiv:2512.24601, 2025. https://arxiv.org/abs/2512.24601
+
+rlm-ig is an independent implementation and is not affiliated with the authors. The example logs come from Loghub:
+
+> Jieming Zhu, Shilin He, Pinjia He, Jinyang Liu, Michael R. Lyu. *Loghub: A Large Collection of System Log Datasets for AI-driven Log Analytics*. IEEE ISSRE 2023. https://github.com/logpai/loghub
 
 ## License
 

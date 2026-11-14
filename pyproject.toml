@@ -1,20 +1,23 @@
 [build-system]
-requires = ["hatchling>=1.21"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "rlm-ig"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Recursive language models over a real Python REPL, driven by Claude Code, opencode, or any API."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Ishaan Gupta" }]
 keywords = ["llm", "agents", "rlm", "recursive-language-models", "long-context", "claude-code", "opencode"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -31,7 +34,17 @@ dev = ["pytest>=8", "ruff>=0.6", "pydantic>=2", "anthropic>=0.60"]
 rlm = "rlm_ig.cli:main"
 
 [project.urls]
+Homepage = "https://github.com/ishaangupta-yb/rlm-ig"
+Documentation = "https://github.com/ishaangupta-yb/rlm-ig/tree/main/docs"
 Repository = "https://github.com/ishaangupta-yb/rlm-ig"
+Issues = "https://github.com/ishaangupta-yb/rlm-ig/issues"
+Changelog = "https://github.com/ishaangupta-yb/rlm-ig/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/rlm_ig/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "docs", "examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rlm_ig"]

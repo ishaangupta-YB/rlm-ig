@@ -151,7 +151,7 @@ Each turn the model replies with a short note and one Python block. The block ru
 | your tools | Plain Python functions you pass in; they run in your process |
 | `submit(value)` | Finish with this answer |
 
-These are ordinary synchronous functions, so the model writes plain Python with no `await`. See [docs/concepts.md](docs/concepts.md) and [docs/repl-api.md](docs/repl-api.md).
+These are ordinary synchronous functions, so the model writes plain Python with no `await`. See [docs/concepts.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/concepts.md) and [docs/repl-api.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/repl-api.md).
 
 ## Backends
 
@@ -171,7 +171,7 @@ A cheaper model for the fan-out work is usually the best first optimisation:
 rlm.run(task, data, model="claude-code:sonnet", sub_model="claude-code:haiku")
 ```
 
-Details, settings and billing notes for each backend: [docs/backends.md](docs/backends.md).
+Details, settings and billing notes for each backend: [docs/backends.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/backends.md).
 
 ## Python API
 
@@ -230,7 +230,7 @@ result.raise_for_status()
 
 **Progress.** `on_event=` receives every event as it happens (`model.reply`, `cell`, `call.start`, `agent.end`, …). `arun` is the async form of `run`, and many runs can share one event loop.
 
-Full reference: [docs/python-api.md](docs/python-api.md). Runnable scripts: [examples/](examples/).
+Full reference: [docs/python-api.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/python-api.md). Runnable scripts: [examples/](https://github.com/ishaangupta-yb/rlm-ig/tree/main/examples).
 
 ## Command line
 
@@ -245,7 +245,7 @@ rlm doctor [--live]      rlm trace [FILE] [--full] [--html OUT]      rlm demo
 - The answer goes to stdout and progress to stderr, so `rlm … > answer.txt` and pipelines behave.
 - Exit code 0 for `ok`, 2 for `partial`, 1 for `failed`.
 
-Project defaults live in `rlm.toml` (see [examples/rlm.toml](examples/rlm.toml) and [docs/configuration.md](docs/configuration.md)).
+Project defaults live in `rlm.toml` (see [examples/rlm.toml](https://github.com/ishaangupta-yb/rlm-ig/blob/main/examples/rlm.toml) and [docs/configuration.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/configuration.md)).
 
 ## Limits and cost control
 
@@ -312,7 +312,7 @@ The REPL worker is an ordinary subprocess running as you. **It is not a security
 - The host only ever parses JSON from a worker. It never unpickles anything a worker produced.
 - Claude Code and opencode run with their own tools disabled, in a temporary directory.
 
-For real isolation, wrap the worker with `sandbox.launcher` (a container or jail). The worker's source is shipped over stdin, so nothing needs to be mounted. See [docs/security.md](docs/security.md), including the note on prompt injection from the data you load.
+For real isolation, wrap the worker with `sandbox.launcher` (a container or jail). The worker's source is shipped over stdin, so nothing needs to be mounted. See [docs/security.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/security.md), including the note on prompt injection from the data you load.
 
 ## Testing
 
@@ -347,10 +347,10 @@ Stated plainly, so you know what has and has not been proven:
 
 ## Documentation
 
-The guide is in [docs/](docs/README.md):
+The guide is in [docs/](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/README.md):
 
-[Quickstart](docs/quickstart.md) · [Concepts](docs/concepts.md) · [REPL reference](docs/repl-api.md) · [Backends](docs/backends.md) · [Configuration](docs/configuration.md) · [Python API](docs/python-api.md) · [Tools and MCP](docs/tools-and-mcp.md) · [Sessions](docs/sessions.md) · [Tracing](docs/tracing.md) · [Security](docs/security.md) · [Troubleshooting](docs/troubleshooting.md)
+[Quickstart](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/quickstart.md) · [Concepts](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/concepts.md) · [REPL reference](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/repl-api.md) · [Backends](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/backends.md) · [Configuration](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/configuration.md) · [Python API](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/python-api.md) · [Tools and MCP](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/tools-and-mcp.md) · [Sessions](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/sessions.md) · [Tracing](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/tracing.md) · [Security](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/security.md) · [Troubleshooting](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/troubleshooting.md)
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/ishaangupta-yb/rlm-ig/blob/main/LICENSE).

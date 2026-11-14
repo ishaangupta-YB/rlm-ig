@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 from collections.abc import Callable
@@ -92,9 +93,27 @@ def detect() -> str | None:
         return "claude-code"
     if shutil.which("opencode"):
         return "opencode"
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+    if anthropic_key_set() and anthropic_sdk_installed():
         return "anthropic:claude-opus-5-5"
     return None
+
+
+def anthropic_key_set() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
+def anthropic_sdk_installed() -> bool:
+    try:
+        return importlib.util.find_spec("anthropic") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def no_backend_message() -> str:
+    """:data:`NO_BACKEND`, plus a line when an Anthropic key is set but its SDK is missing."""
+    if anthropic_key_set() and not anthropic_sdk_installed():
+        return NO_BACKEND + ANTHROPIC_SDK_MISSING
+    return NO_BACKEND
 
 
 NO_BACKEND = """\
@@ -109,7 +128,12 @@ Pick one of:
 Set it per call (model=...), in rlm.toml (model = "..."), or with $RLM_MODEL. Run `rlm doctor` to see what is available.
 """
 
+ANTHROPIC_SDK_MISSING = """
+ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) is set, but the Anthropic SDK is not installed, so the anthropic
+backend was not picked. Install it with:  pip install "rlm-ig[anthropic]"
+"""
+
 __all__ = [
     "Chat", "Model", "Reply", "Scripted", "StatelessChat", "Turn",
-    "detect", "providers", "resolve", "split_spec",
+    "detect", "no_backend_message", "providers", "resolve", "split_spec",
 ]  # fmt: skip

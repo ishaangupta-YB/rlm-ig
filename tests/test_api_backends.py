@@ -136,6 +136,74 @@ def test_presets_and_key_handling(monkeypatch, cfg):
         resolve("openai", cfg)
 
 
+def test_ollama_uses_localhost_without_ollama_host(monkeypatch, cfg):
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    assert resolve("ollama:x", cfg).base_url == "http://localhost:11434/v1"
+
+
+@pytest.mark.parametrize(
+    ("host", "url"),
+    [
+        ("host.docker.internal:11434", "http://host.docker.internal:11434/v1"),
+        ("host.docker.internal", "http://host.docker.internal:11434/v1"),
+        ("http://ollama:11434", "http://ollama:11434/v1"),
+        ("http://ollama:11434/", "http://ollama:11434/v1"),
+        ("https://ollama.example.com", "https://ollama.example.com/v1"),
+        ("http://ollama:11434/v1", "http://ollama:11434/v1"),
+        ("0.0.0.0", "http://0.0.0.0:11434/v1"),
+    ],
+)
+def test_ollama_url_follows_ollama_host(monkeypatch, cfg, host, url):
+    monkeypatch.setenv("OLLAMA_HOST", host)
+    assert resolve("ollama:x", cfg).base_url == url
+
+
+def test_ollama_base_url_in_config_wins_over_ollama_host(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://elsewhere:1")
+    config = rlm.Config(providers={"ollama": {"base_url": "http://configured:2/v1"}})
+    assert resolve("ollama:x", config).base_url == "http://configured:2/v1"
+
+
+def test_ollama_host_does_not_affect_other_providers(monkeypatch, cfg):
+    monkeypatch.setenv("OLLAMA_HOST", "http://elsewhere:1")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    assert resolve("openai:gpt-test", cfg).base_url == "https://api.openai.com/v1"
+
+
+# ------------------------------------------------------------------ detection
+
+
+@pytest.fixture
+def no_cli_backends(tmp_path, monkeypatch):
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+
+def test_detect_picks_anthropic_when_the_key_and_sdk_are_present(monkeypatch, no_cli_backends):
+    from rlm_ig.models import detect
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert detect() == "anthropic:claude-opus-5-5"
+
+
+def test_detect_skips_anthropic_when_the_sdk_is_missing(monkeypatch, no_cli_backends, cfg):
+    import importlib.util
+
+    from rlm_ig import models
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "anthropic" else real(name, *a))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert models.detect() is None
+    assert "the Anthropic SDK is not installed" in models.no_backend_message()
+    with pytest.raises(rlm.ConfigError, match="the Anthropic SDK is not installed"):
+        rlm.run("t", config=cfg)
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert models.no_backend_message() == models.NO_BACKEND
+
+
 def test_custom_provider_from_config(cfg):
     with OpenAIServer(lambda body: block("submit(context[::-1])")) as api:
         config = cfg.replace(providers={"lab": {"kind": "openai", "base_url": api.url, "api_key": "x"}})

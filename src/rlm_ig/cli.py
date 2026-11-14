@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -15,10 +17,10 @@ from typing import Any
 
 from . import __version__, procs
 from .api import Engine, Result
-from .config import PROJECT_FILE, Config, user_config_path
+from .config import PROJECT_FILE, Config, session_dir, user_config_path
 from .errors import RlmError
 from .loaders import load_many
-from .models import detect, resolve
+from .models import anthropic_key_set, anthropic_sdk_installed, detect, resolve
 from .trace import latest_trace, read_trace
 from .trace.report import outline, render_html
 
@@ -34,6 +36,12 @@ examples:
   rlm trace             show the most recent run step by step
   rlm demo              watch a complete run offline, no model needed
 """
+
+
+SANDBOX_HELP = (
+    "run model-written code in a locked-down container: docker, docker:IMAGE, podman or podman:IMAGE "
+    "(default image: the rlm-ig sandbox image for this version)"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--config", metavar="FILE", help=f"config file (default: {PROJECT_FILE} here or in a parent directory)"
     )
+    run.add_argument("--sandbox", metavar="docker[:IMAGE]", help=SANDBOX_HELP)
     noise = run.add_mutually_exclusive_group()
     noise.add_argument("-q", "--quiet", action="store_true", help="print only the answer")
     noise.add_argument("-v", "--verbose", action="store_true", help="show the code and output of every step")
@@ -85,6 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--live", action="store_true", help="also send one tiny request to the default model")
     doctor.add_argument("-m", "--model", help="model to check instead of the default")
     doctor.add_argument("--config", metavar="FILE")
+    doctor.add_argument("--sandbox", metavar="docker[:IMAGE]", help=SANDBOX_HELP)
 
     trace = sub.add_parser("trace", help="show a past run")
     trace.add_argument("path", nargs="?", help="trace file (default: the most recent run)")
@@ -122,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"rlm-ig {__version__}")
         return 0
     except RlmError as exc:
+        print(f"rlm: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:  # an unreadable file, a directory that cannot be written, ...
         print(f"rlm: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -176,6 +189,7 @@ def _run(args: argparse.Namespace) -> int:
         max_parallel=args.max_parallel,
         verbosity=verbosity,
         trace=False if args.no_trace else None,
+        sandbox=_sandbox_arg(args.sandbox),
     )
     schema = _schema_arg(args.schema)
 
@@ -195,10 +209,14 @@ def _run(args: argparse.Namespace) -> int:
     return _emit(result, args)
 
 
+def _sandbox_arg(value: str | None) -> dict[str, str] | None:
+    return {"preset": value} if value else None
+
+
 def _session_path(name: str) -> str:
     if os.sep in name or name.endswith(".json"):
         return name
-    return str(Path(".rlm") / "sessions" / f"{name}.json")
+    return str(session_dir() / f"{name}.json")
 
 
 def _emit(result: Result, args: argparse.Namespace) -> int:
@@ -244,9 +262,16 @@ def _doctor(args: argparse.Namespace) -> int:
     print(f"rlm-ig {__version__}")
     print("\nruntime")
     row("+", "python", f"{sys.version.split()[0]} ({sys.executable})")
+    try:
+        config: Config | None = Config.load(args.config, model=args.model, sandbox=_sandbox_arg(args.sandbox))
+    except RlmError as exc:
+        config, config_error = None, exc
+    options = config.sandbox if config is not None else None
+    launcher = shlex.join(options.prefix()) if options is not None and options.prefix() else ""
+    where = f" (launcher: {launcher})" if launcher else ""
 
     async def sandbox_check() -> tuple[float, str]:
-        sandbox = Sandbox()
+        sandbox = Sandbox(options)
         started = time.monotonic()
         try:
             await sandbox.start("ping")
@@ -257,10 +282,14 @@ def _doctor(args: argparse.Namespace) -> int:
 
     try:
         seconds, out = asyncio.run(sandbox_check())
-        row("+" if out == "4" else "!", "sandbox", f"REPL worker starts and runs code in {seconds * 1000:.0f} ms")
+        if out == "4":
+            row("+", "sandbox", f"REPL worker starts and runs code in {seconds * 1000:.0f} ms{where}")
+        else:
+            ok = False
+            row("x", "sandbox", f"REPL worker started but returned {out!r} instead of '4'{where}")
     except RlmError as exc:
         ok = False
-        row("x", "sandbox", str(exc))
+        row("x", "sandbox", f"{exc}{where}")
 
     print("\nbackends")
     for name, command in (("claude-code", "claude"), ("opencode", "opencode")):
@@ -298,14 +327,15 @@ def _doctor(args: argparse.Namespace) -> int:
         "user config",
         str(user_file) + ("" if user_file.is_file() else " (not present)"),
     )
-    try:
-        config = Config.load(args.config, model=args.model)
-    except RlmError as exc:
-        row("x", "config", str(exc))
+    if config is None:
+        row("x", "config", str(config_error))
         return 1
     spec = config.model or detect()
     if spec is None:
-        row("x", "default model", "none: install Claude Code or opencode, or set a model (see `rlm --help`)")
+        detail = "none: install Claude Code or opencode, or set a model (see `rlm --help`)"
+        if anthropic_key_set() and not anthropic_sdk_installed():
+            detail += '; ANTHROPIC_API_KEY is set but the SDK is missing (pip install "rlm-ig[anthropic]")'
+        row("x", "default model", detail)
         return 1
     try:
         model = resolve(spec, config)
@@ -414,5 +444,23 @@ def _demo(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def entry() -> None:
+    """The ``rlm`` console script: :func:`main`, then exit.
+
+    After an interrupt (Ctrl-C, or SIGTERM from ``docker stop``) the run has
+    already been cancelled and cleaned up, but an HTTP request blocked in a
+    worker thread would hold up interpreter shutdown until it times out. So
+    an interrupted run leaves at once instead of waiting for it.
+    """
+    code = main()
+    if code == 130:
+        for stream in (sys.stdout, sys.stderr):
+            with contextlib.suppress(Exception):
+                stream.flush()
+        os._exit(code)
+        return  # only reached when os._exit is replaced, as in tests
+    sys.exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    entry()

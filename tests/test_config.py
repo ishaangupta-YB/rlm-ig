@@ -16,6 +16,10 @@ ENV_VARS = (
     "RLM_MAX_PARALLEL",
     "RLM_TIMEOUT",
     "RLM_TRACE_DIR",
+    "RLM_SANDBOX",
+    "RLM_SANDBOX_LAUNCHER",
+    "RLM_SANDBOX_PYTHON",
+    "RLM_SESSION_DIR",
 )
 
 
@@ -275,6 +279,108 @@ def test_sandbox_launcher_list_is_kept_as_is():
 def test_sandbox_launcher_string_from_toml_is_split(isolated):
     (isolated / PROJECT_FILE).write_text('[sandbox]\nlauncher = "nice -n 5"\n')
     assert Config.load().sandbox.launcher == ["nice", "-n", "5"]
+
+
+def test_sandbox_launcher_string_keeps_quoted_arguments_together():
+    config = Config(sandbox={"launcher": "docker run --label 'a b' img"})
+    assert config.sandbox.launcher == ["docker", "run", "--label", "a b", "img"]
+
+
+def test_sandbox_launcher_string_with_an_open_quote_is_a_config_error():
+    with pytest.raises(rlm.ConfigError, match="cannot be split"):
+        Config(sandbox={"launcher": "docker run 'unterminated"})
+
+
+# -------------------------------------------------------------- sandbox preset
+
+
+def test_sandbox_preset_expands_to_the_hardened_container_command():
+    from rlm_ig.sandbox.host import sandbox_image
+
+    config = Config(sandbox={"preset": "docker"})
+    assert config.sandbox.launcher == []
+    assert config.sandbox.prefix() == [
+        "docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--tmpfs", "/tmp", "-w", "/tmp",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "1g", "--pids-limit", "256",
+        "--user", "65534:65534", sandbox_image(),
+    ]  # fmt: skip
+    assert sandbox_image() == f"ghcr.io/ishaangupta-yb/rlm-ig-sandbox:{rlm.__version__}"
+
+
+def test_sandbox_preset_takes_an_image_and_podman():
+    assert Config(sandbox={"preset": "docker:python:3.12-slim"}).sandbox.prefix()[-1] == "python:3.12-slim"
+    podman = Config(sandbox={"preset": "podman:img"}).sandbox.prefix()
+    assert podman[0] == "podman" and podman[-1] == "img" and "--network" in podman
+
+
+def test_sandbox_preset_command_runs_python3_in_the_container():
+    command = Config(sandbox={"preset": "docker:img"}).sandbox.command(10)
+    assert command[command.index("img") + 1 : command.index("img") + 3] == ["python3", "-u"]
+
+
+def test_explicit_launcher_wins_over_a_preset_in_the_same_source():
+    config = Config(sandbox={"preset": "docker", "launcher": ["nice"]})
+    assert config.sandbox.prefix() == ["nice"]
+
+
+def test_unknown_sandbox_preset_is_a_config_error():
+    with pytest.raises(rlm.ConfigError, match="unknown sandbox preset 'lxc'"):
+        Config(sandbox={"preset": "lxc"})
+
+
+def test_preset_from_a_later_source_replaces_an_earlier_launcher(isolated, monkeypatch):
+    (isolated / PROJECT_FILE).write_text('[sandbox]\nlauncher = ["nice"]\n')
+    assert Config.load().sandbox.prefix() == ["nice"]
+    monkeypatch.setenv("RLM_SANDBOX", "docker:img")
+    assert Config.load().sandbox.prefix()[-1] == "img"
+    monkeypatch.delenv("RLM_SANDBOX")
+    assert Config.load(sandbox={"preset": "podman:img"}).sandbox.prefix()[0] == "podman"
+
+
+def test_preset_and_launcher_in_one_file_keep_the_launcher(isolated):
+    (isolated / PROJECT_FILE).write_text('[sandbox]\npreset = "docker"\nlauncher = "nice -n 5"\n')
+    assert Config.load().sandbox.prefix() == ["nice", "-n", "5"]
+
+
+# ------------------------------------------------------ sandbox environment
+
+
+def test_rlm_sandbox_sets_the_preset(monkeypatch):
+    monkeypatch.setenv("RLM_SANDBOX", "docker:python:3.12-slim")
+    sandbox = Config.load().sandbox
+    assert sandbox.preset == "docker:python:3.12-slim" and sandbox.prefix()[-1] == "python:3.12-slim"
+
+
+def test_rlm_sandbox_launcher_is_split_like_a_shell(monkeypatch):
+    monkeypatch.setenv("RLM_SANDBOX_LAUNCHER", "docker run --label 'a b' img")
+    assert Config.load().sandbox.launcher == ["docker", "run", "--label", "a b", "img"]
+
+
+def test_rlm_sandbox_python_sets_the_interpreter(monkeypatch):
+    monkeypatch.setenv("RLM_SANDBOX_PYTHON", "/usr/local/bin/python3.12")
+    assert Config.load().sandbox.python == "/usr/local/bin/python3.12"
+
+
+def test_sandbox_environment_merges_with_the_file(isolated, monkeypatch):
+    (isolated / PROJECT_FILE).write_text("[sandbox]\nmemory_mb = 256\n")
+    monkeypatch.setenv("RLM_SANDBOX_PYTHON", "python3.12")
+    sandbox = Config.load().sandbox
+    assert sandbox.memory_mb == 256 and sandbox.python == "python3.12"
+
+
+def test_blank_sandbox_variables_are_ignored(monkeypatch):
+    for name in ("RLM_SANDBOX", "RLM_SANDBOX_LAUNCHER", "RLM_SANDBOX_PYTHON"):
+        monkeypatch.setenv(name, " ")
+    sandbox = Config.load().sandbox
+    assert sandbox.preset is None and sandbox.launcher == [] and sandbox.python is None
+
+
+def test_rlm_session_dir(monkeypatch, tmp_path):
+    from rlm_ig.config import session_dir
+
+    assert str(session_dir()) == ".rlm/sessions"
+    monkeypatch.setenv("RLM_SESSION_DIR", str(tmp_path / "s"))
+    assert session_dir() == tmp_path / "s"
 
 
 def test_cell_timeout_reaches_the_sandbox_options():

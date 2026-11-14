@@ -31,7 +31,7 @@ anthropic = ["anthropic>=0.60"]
 dev = ["pytest>=8", "ruff>=0.6", "pydantic>=2", "anthropic>=0.60"]
 
 [project.scripts]
-rlm = "rlm_ig.cli:main"
+rlm = "rlm_ig.cli:entry"
 
 [project.urls]
 Homepage = "https://github.com/ishaangupta-yb/rlm-ig"
@@ -54,6 +54,7 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
   "live: talks to a real model backend (needs credentials; skipped unless RLM_LIVE=1)",
+  "docker: runs the REPL worker in Docker containers (skipped unless `docker info` succeeds)",
 ]
 
 [tool.ruff]
@@ -72,4 +73,4 @@ ignore = ["E501", "B008"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["rlm_ig"]
-known-local-folder = ["helpers"]
+known-local-folder = ["helpers", "pydantic_models"]

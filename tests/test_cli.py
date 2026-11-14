@@ -437,6 +437,44 @@ def test_a_second_invocation_reuses_the_variables_of_the_first(capsys, make_conf
     assert out == "43\n"
 
 
+def test_session_directory_comes_from_rlm_session_dir(capsys, make_config, tmp_path, monkeypatch):
+    folder = tmp_path / "state" / "sessions"
+    monkeypatch.setenv("RLM_SESSION_DIR", str(folder))
+    code, out, _ = run_cli(capsys, "remember it", "--config", make_config(SESSION_PROGRAM), "--session", "demo", "-q")
+    assert code == 0 and out == "stored\n"
+    assert (folder / "demo.json").is_file()
+    assert not (tmp_path / "work" / ".rlm").exists()
+
+
+def test_an_os_error_is_reported_without_a_traceback(capsys, make_config, tmp_path):
+    write(tmp_path / "work" / "blocker", "a file where a directory should be")
+    code, _, err = run_cli(
+        capsys, "remember it", "--config", make_config(SESSION_PROGRAM), "--session", "blocker/s.json"
+    )
+    assert code == 1 and "Traceback" not in err
+    assert err.splitlines()[-1] == "rlm: [Errno 17] File exists: 'blocker'"
+
+
+def test_run_sandbox_flag_reaches_the_config(capsys, config, monkeypatch):
+    seen = {}
+    real = __import__("rlm_ig.cli", fromlist=["Engine"]).Engine
+
+    def spy(cfg, *a, **k):
+        seen["sandbox"] = cfg.sandbox
+        return real(cfg, *a, **k)
+
+    monkeypatch.setattr("rlm_ig.cli.Engine", spy)
+    run_cli(capsys, "t", "--config", config, "--sandbox", "no-such-runtime")
+    assert "sandbox" not in seen  # an unknown preset is refused before anything runs
+    run_cli(capsys, "t", "--config", config, "--sandbox", "podman:img")
+    assert seen["sandbox"].prefix()[0] == "podman" and seen["sandbox"].prefix()[-1] == "img"
+
+
+def test_run_with_an_unknown_sandbox_preset_exits_1(capsys, config):
+    code, _, err = run_cli(capsys, "t", "--config", config, "--sandbox", "lxc")
+    assert code == 1 and "unknown sandbox preset 'lxc'" in err
+
+
 def test_sessions_with_different_names_are_independent(capsys, make_config):
     config = make_config(SESSION_PROGRAM)
     run_cli(capsys, "remember it", "--config", config, "--session", "one", "-q")
@@ -618,6 +656,57 @@ def test_doctor_succeeds_and_reports_the_sandbox(capsys, config, bare_path):
     assert sandbox.strip().startswith("+") and "REPL worker starts and runs code" in sandbox
 
 
+def system_tool(name):
+    import shutil
+
+    path = shutil.which(name, path="/usr/bin:/bin")
+    if path is None:
+        pytest.skip(f"needs {name}")
+    return path
+
+
+def sandbox_row(out):
+    return next(line for line in out.splitlines() if " sandbox " in line)
+
+
+def test_doctor_uses_the_configured_sandbox_launcher(capsys, make_config, bare_path):
+    launcher = json.dumps([system_tool("env"), "RLM_WRAPPED=yes"])
+    config = make_config(extra=f"[sandbox]\nlauncher = {launcher}\npython = {json.dumps(sys.executable)}")
+    code, out, _ = run_cli(capsys, "doctor", "--config", config)
+    row = sandbox_row(out)
+    assert code == 0 and row.strip().startswith("+")
+    assert "REPL worker starts and runs code" in row and "(launcher: " in row and "RLM_WRAPPED=yes" in row
+
+
+def test_doctor_reports_a_broken_sandbox_launcher_and_exits_1(capsys, make_config, bare_path):
+    config = make_config(extra=f"[sandbox]\nlauncher = [{json.dumps(system_tool('false'))}]")
+    code, out, _ = run_cli(capsys, "doctor", "--config", config)
+    row = sandbox_row(out)
+    assert code == 1 and row.strip().startswith("x") and "sandbox failed to start" in row
+    assert "launcher: " in row
+    assert "default model  fake:m" in out  # the rest of the report still runs
+
+
+def test_doctor_reports_a_missing_launcher_program(capsys, make_config, bare_path):
+    config = make_config(extra='[sandbox]\nlauncher = ["no-such-launcher-xyz"]')
+    code, out, _ = run_cli(capsys, "doctor", "--config", config)
+    assert code == 1 and "could not start the sandbox ('no-such-launcher-xyz')" in sandbox_row(out)
+
+
+def test_doctor_sandbox_flag_selects_the_preset(capsys, config, bare_path):
+    # the empty PATH has no docker, so the preset fails, and the row says which command it tried
+    code, out, _ = run_cli(capsys, "doctor", "--config", config, "--sandbox", "docker:img")
+    row = sandbox_row(out)
+    assert code == 1 and row.strip().startswith("x")
+    assert "(launcher: docker run --rm -i --network none" in row and row.endswith("img)")
+
+
+def test_doctor_honours_the_config_flag_for_the_sandbox(capsys, make_config, bare_path):
+    config = make_config(extra='[sandbox]\npreset = "lxc"')
+    code, out, _ = run_cli(capsys, "doctor", "--config", config)
+    assert code == 1 and "unknown sandbox preset 'lxc'" in out
+
+
 def test_doctor_reports_the_model_limits_and_traces(capsys, config, bare_path, traces):
     _, out, _ = run_cli(capsys, "doctor", "-m", "fake:m", "--config", config)
     assert "default model  fake:m" in out
@@ -672,6 +761,70 @@ def test_doctor_live_failure_exits_1(capsys, make_config, bare_path):
 def test_doctor_without_live_points_at_the_flag(capsys, config, bare_path):
     _, out, _ = run_cli(capsys, "doctor", "--config", config)
     assert "rlm doctor --live" in out
+
+
+# ------------------------------------------------------------- entry point
+
+
+def test_entry_exits_with_mains_code(monkeypatch):
+    from rlm_ig import cli
+
+    monkeypatch.setattr(cli, "main", lambda: 2)
+    with pytest.raises(SystemExit) as info:
+        cli.entry()
+    assert info.value.code == 2
+
+
+def test_entry_leaves_at_once_after_an_interrupt(monkeypatch):
+    from rlm_ig import cli
+
+    exits = []
+    monkeypatch.setattr(cli, "main", lambda: 130)
+    monkeypatch.setattr(cli.os, "_exit", exits.append)
+    cli.entry()
+    assert exits == [130]
+
+
+def test_sigterm_during_a_hung_request_exits_promptly(tmp_path):
+    """A model request that never answers must not keep the process alive after SIGTERM."""
+    import os
+    import signal
+    import socket
+    import subprocess
+    import time
+
+    if os.name != "posix":
+        pytest.skip("POSIX signals")
+    hang = socket.socket()
+    hang.bind(("127.0.0.1", 0))
+    hang.listen(8)  # accepts connections, never answers
+    env = {k: v for k, v in os.environ.items() if not k.startswith("RLM_")}
+    env.update(
+        OPENAI_API_KEY="x",
+        OPENAI_BASE_URL=f"http://127.0.0.1:{hang.getsockname()[1]}/v1",
+        HOME=str(tmp_path),
+        XDG_STATE_HOME=str(tmp_path / "state"),
+        XDG_CONFIG_HOME=str(tmp_path / "config"),
+    )
+    code = "from rlm_ig.cli import entry; entry()"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, "t", "-m", "openai:x", "--no-trace", "-q"],
+        cwd=tmp_path,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        time.sleep(3)
+        started = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=30)
+        assert time.monotonic() - started < 5
+        assert proc.returncode == 130 and b"interrupted" in err
+    finally:
+        proc.kill()
+        hang.close()
 
 
 # ------------------------------------------------------------- version and help

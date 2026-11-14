@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import collections.abc as cabc
 import dataclasses
+import enum
 import json
 import re
 import types
@@ -99,6 +100,101 @@ def _from_hint(hint: Any) -> dict:
     raise SchemaError(
         f"unsupported output type {hint!r}; use a JSON Schema dict, a basic type hint, a dataclass, or a Pydantic model"
     )
+
+
+# ------------------------------------------------------------------ building
+
+
+def build(hint: Any, value: Any) -> Any:
+    """Turn a validated JSON value into ``hint``, recursing into containers.
+
+    Dataclasses are built from dicts at every level, so ``list[Incident]``
+    inside a dataclass gives ``Incident`` instances. Pydantic models are built
+    with ``model_validate``. ``list[X]``, ``tuple[X, ...]``, ``dict[str, X]``
+    and ``X | None`` are followed into. ``TypedDict``, ``Literal``, enum and
+    plain values are returned unchanged. Raises ``TypeError`` or
+    ``ValueError`` when ``value`` does not fit ``hint``.
+    """
+    if hint is Any or hint is None:
+        return value
+    if hasattr(hint, "model_validate"):  # Pydantic v2 model
+        return hint.model_validate(value)
+    origin = typing.get_origin(hint)
+    args = typing.get_args(hint)
+    if origin is typing.Annotated:
+        return build(args[0], value)
+    if origin is typing.Literal:
+        return value
+    if origin is typing.Union or origin is types.UnionType:
+        if value is None and type(None) in args:
+            return None
+        failures = []
+        for arg in args:
+            if arg is type(None):
+                continue
+            try:
+                return build(arg, value)
+            except (TypeError, ValueError, KeyError) as exc:
+                failures.append(f"{arg!r}: {exc}")
+        raise TypeError(f"{value!r} fits none of {hint!r} ({'; '.join(failures)})")
+    if origin in (list, set, frozenset, cabc.Sequence, cabc.Iterable, cabc.Collection):
+        items = _as_list(value, hint)
+        built = [build(args[0], v) for v in items] if args else list(items)
+        return built if origin not in (set, frozenset) else origin(built)
+    if origin is tuple:
+        items = _as_list(value, hint)
+        if not args:
+            return tuple(items)
+        if len(args) == 2 and args[1] is Ellipsis:
+            return tuple(build(args[0], v) for v in items)
+        if len(args) != len(items):
+            raise ValueError(f"expected {len(args)} items for {hint!r}, got {len(items)}")
+        return tuple(build(a, v) for a, v in zip(args, items, strict=True))
+    if origin is dict:
+        if not isinstance(value, dict):
+            raise TypeError(f"expected an object for {hint!r}, got {type(value).__name__}")
+        return {k: build(args[1], v) for k, v in value.items()} if len(args) == 2 else dict(value)
+    if dataclasses.is_dataclass(hint) and isinstance(hint, type):
+        if not isinstance(value, dict):
+            raise TypeError(f"expected an object for {hint.__name__}, got {type(value).__name__}")
+        hints = _field_hints(hint)
+        known = {f.name for f in dataclasses.fields(hint) if f.init}
+        unknown = set(value) - known
+        if unknown:
+            raise TypeError(f"{hint.__name__} has no field(s) {', '.join(sorted(unknown))}")
+        return hint(**{k: build(hints.get(k, Any), v) for k, v in value.items()})
+    if isinstance(hint, type) and issubclass(hint, enum.Enum):
+        return value
+    if hint in _PRIMITIVES and isinstance(hint, type):
+        if not _fits(value, hint):
+            raise TypeError(f"expected {hint.__name__}, got {type(value).__name__}")
+        return tuple(value) if hint is tuple else set(value) if hint is set else value
+    return value  # TypedDict, plain classes, string annotations: leave the JSON value as it is
+
+
+def _field_hints(cls: type) -> dict[str, Any]:
+    try:
+        return typing.get_type_hints(cls)
+    except Exception:  # noqa: BLE001 - e.g. a forward reference to a class that is not importable
+        return {f.name: f.type for f in dataclasses.fields(cls) if not isinstance(f.type, str)}
+
+
+def _as_list(value: Any, hint: Any) -> list:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"expected an array for {hint!r}, got {type(value).__name__}")
+    return list(value)
+
+
+def _fits(value: Any, hint: type) -> bool:
+    if hint is type(None):
+        return value is None
+    if hint is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if hint is int:
+        return _TYPE_CHECKS["integer"](value)
+    if hint in (list, tuple, set):
+        return isinstance(value, (list, tuple))
+    return isinstance(value, hint)
 
 
 # ---------------------------------------------------------------- validation

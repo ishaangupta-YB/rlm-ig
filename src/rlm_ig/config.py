@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import shlex
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -138,9 +139,9 @@ class Config:
                 files.append(found)
         for file in files:
             if file.is_file():
-                _merge(values, _read_toml(file))
-        _merge(values, _from_env())
-        _merge(values, {k: v for k, v in overrides.items() if v is not None})
+                _layer(values, _read_toml(file))
+        _layer(values, _from_env())
+        _layer(values, {k: v for k, v in overrides.items() if v is not None})
         known = {f.name for f in dataclasses.fields(cls)}
         unknown = set(values) - known
         if unknown:
@@ -158,8 +159,26 @@ def _sandbox_from(raw: dict[str, Any]) -> SandboxOptions:
         raise ConfigError(f"unknown [sandbox] option(s): {', '.join(sorted(unknown))}")
     launcher = raw.get("launcher")
     if isinstance(launcher, str):
-        raw = dict(raw, launcher=launcher.split())
+        try:
+            raw = dict(raw, launcher=shlex.split(launcher))
+        except ValueError as exc:
+            raise ConfigError(f"sandbox launcher {launcher!r} cannot be split into words: {exc}") from exc
     return SandboxOptions(**raw)
+
+
+def _layer(into: dict[str, Any], layer: dict[str, Any]) -> None:
+    """Merge one source over the ones before it.
+
+    A sandbox ``preset`` set by a later source replaces a ``launcher`` set by
+    an earlier one, so ``--sandbox docker`` beats a launcher in a config file.
+    Within one source, a ``launcher`` wins over a ``preset``.
+    """
+    sandbox = layer.get("sandbox")
+    if isinstance(sandbox, dict) and sandbox.get("preset") and "launcher" not in sandbox:
+        current = into.get("sandbox")
+        if isinstance(current, dict) and "launcher" in current:
+            into["sandbox"] = {k: v for k, v in current.items() if k != "launcher"}
+    _merge(into, layer)
 
 
 def _find_up(name: str) -> Path | None:
@@ -202,6 +221,14 @@ _ENV = {
 }
 
 
+# variable -> key in the [sandbox] table (strings; the launcher is split like a shell would)
+_SANDBOX_ENV = {
+    "RLM_SANDBOX": "preset",
+    "RLM_SANDBOX_LAUNCHER": "launcher",
+    "RLM_SANDBOX_PYTHON": "python",
+}
+
+
 def _from_env() -> dict[str, Any]:
     out: dict[str, Any] = {}
     for var, (key, cast) in _ENV.items():
@@ -212,4 +239,23 @@ def _from_env() -> dict[str, Any]:
             out[key] = cast(raw)
         except ValueError as exc:
             raise ConfigError(f"${var}={raw!r} is not a valid {cast.__name__}") from exc
+    sandbox: dict[str, Any] = {}
+    for var, key in _SANDBOX_ENV.items():
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        if key == "launcher":
+            try:
+                sandbox[key] = shlex.split(raw)
+            except ValueError as exc:
+                raise ConfigError(f"${var}={raw!r} cannot be split into words: {exc}") from exc
+        else:
+            sandbox[key] = raw
+    if sandbox:
+        out["sandbox"] = sandbox
     return out
+
+
+def session_dir() -> Path:
+    """Where ``rlm --session NAME`` keeps its files: ``$RLM_SESSION_DIR`` or ``./.rlm/sessions``."""
+    return Path(os.environ.get("RLM_SESSION_DIR") or Path(".rlm") / "sessions").expanduser()

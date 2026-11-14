@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..errors import SandboxError
+from ..errors import ConfigError, SandboxError
 
 WORKER_SOURCE = (Path(__file__).with_name("worker.py")).read_bytes()
 
@@ -50,6 +50,41 @@ PASSTHROUGH_ENV = (
 
 CallHandler = Callable[[str, dict], Awaitable[dict]]
 
+# `sandbox.preset = "docker[:IMAGE]"` (or podman) expands to the container
+# runtime followed by these flags and the image. No network, a read-only root
+# with a writable /tmp as the working directory, no capabilities, no privilege
+# escalation, bounded memory and processes, and an unprivileged user.
+CONTAINER_RUNTIMES = ("docker", "podman")
+CONTAINER_FLAGS = (
+    "run", "--rm", "-i",
+    "--network", "none",
+    "--read-only", "--tmpfs", "/tmp", "-w", "/tmp",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--memory", "1g", "--pids-limit", "256",
+    "--user", "65534:65534",
+)  # fmt: skip
+SANDBOX_IMAGE_REPO = "ghcr.io/ishaangupta-yb/rlm-ig-sandbox"
+#: the plain interpreter image, for `docker:python:3.12-slim`
+PLAIN_IMAGE = "python:3.12-slim"
+
+
+def sandbox_image() -> str:
+    """The default preset image: the sandbox image built from this release."""
+    from .. import __version__
+
+    return f"{SANDBOX_IMAGE_REPO}:{__version__}"
+
+
+def expand_preset(preset: str) -> list[str]:
+    """``"docker"`` or ``"docker:IMAGE"`` (or podman) -> the launcher command prefix."""
+    runtime, _, image = str(preset).strip().partition(":")
+    if runtime not in CONTAINER_RUNTIMES:
+        raise ConfigError(
+            f"unknown sandbox preset {preset!r}; use one of {', '.join(CONTAINER_RUNTIMES)}, optionally with :IMAGE"
+        )
+    return [runtime, *CONTAINER_FLAGS, image.strip() or sandbox_image()]
+
 
 @dataclass
 class SandboxOptions:
@@ -64,10 +99,25 @@ class SandboxOptions:
     cell_timeout: float = 120.0
     capture_limit: int = 200_000
     workdir: str | None = None
+    #: ``"docker"``, ``"docker:IMAGE"``, ``"podman"`` or ``"podman:IMAGE"``; an explicit ``launcher`` wins
+    preset: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.preset is not None and not isinstance(self.preset, str):
+            raise ConfigError(f"sandbox preset must be a string, got {self.preset!r}")
+        if self.preset:
+            expand_preset(self.preset)
+
+    def prefix(self) -> list[str]:
+        """The command the worker is wrapped in: the launcher, else the preset's, else nothing."""
+        if self.launcher:
+            return list(self.launcher)
+        return expand_preset(self.preset) if self.preset else []
 
     def command(self, source_len: int) -> list[str]:
-        python = self.python or ("python3" if self.launcher else sys.executable)
-        return [*self.launcher, python, "-u", "-c", BOOTSTRAP, str(source_len)]
+        prefix = self.prefix()
+        python = self.python or ("python3" if prefix else sys.executable)
+        return [*prefix, python, "-u", "-c", BOOTSTRAP, str(source_len)]
 
     def environment(self) -> dict[str, str]:
         if self.inherit_env:
@@ -417,7 +467,7 @@ class Sandbox:
     def _interrupt(self) -> bool:
         """Ask the running cell to stop. False means it cannot be interrupted."""
         proc = self._proc
-        if proc is None or os.name != "posix" or self.options.launcher:
+        if proc is None or os.name != "posix" or self.options.prefix():
             return False
         try:
             proc.send_signal(signal.SIGINT)

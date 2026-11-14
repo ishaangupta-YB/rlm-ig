@@ -14,6 +14,7 @@ import os
 import random
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -31,6 +32,31 @@ PRESETS: dict[str, tuple[str, str | None]] = {
     "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY"),
     "ollama": ("http://localhost:11434/v1", None),
 }
+
+
+def ollama_url(host: str | None) -> str | None:
+    """The OpenAI-compatible endpoint for ``$OLLAMA_HOST``.
+
+    Accepts what Ollama itself accepts: ``host``, ``host:port``,
+    ``http://host:port`` or ``https://...``. Like Ollama, a bare host without
+    a scheme gets port 11434, and a URL with a scheme keeps that scheme's port.
+    """
+    host = (host or "").strip().rstrip("/")
+    if not host:
+        return None
+    if "://" not in host:
+        parts = urllib.parse.urlsplit(f"http://{host}")
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        if port is None:
+            netloc = parts.netloc or "127.0.0.1"
+            host = f"http://{netloc}:11434{parts.path}"
+        else:
+            host = f"http://{host}"
+    return host if host.endswith("/v1") else f"{host}/v1"
+
 
 _RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
 
@@ -53,7 +79,11 @@ class OpenAICompatible(Model):
             raise ModelError(f"{provider} needs a model id, for example {provider}:<model-id>")
         self.spec = f"{provider}:{self.model_name}"
         preset_url, preset_key = PRESETS.get(provider, (None, None))
-        base = settings.get("base_url") or (os.environ.get("OPENAI_BASE_URL") if provider == "openai" else None)
+        base = settings.get("base_url")
+        if not base and provider == "openai":
+            base = os.environ.get("OPENAI_BASE_URL")
+        if not base and provider == "ollama":
+            base = ollama_url(os.environ.get("OLLAMA_HOST"))
         self.base_url = (base or preset_url or "").rstrip("/")
         if not self.base_url:
             raise ModelError(f"[providers.{provider}] needs a base_url")

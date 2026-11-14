@@ -16,9 +16,9 @@ from .engine.agent import Agent
 from .engine.events import Event, Events
 from .engine.run import Run
 from .errors import ConfigError, RlmError, RunFailed
-from .models import NO_BACKEND, Model, detect, resolve
+from .models import Model, detect, no_backend_message, resolve
 from .sandbox import Sandbox
-from .schema import to_schema
+from .schema import build, to_schema
 from .text import clip_middle, first_line
 from .tools import Toolbox
 from .trace import TraceWriter, new_trace_path
@@ -92,7 +92,7 @@ class Engine:
         self.config = config
         spec = config.model or detect()
         if spec is None:
-            raise ConfigError(NO_BACKEND)
+            raise ConfigError(no_backend_message())
         self.model: Model = resolve(spec, config)
         if config.sub_model is None or config.sub_model == spec:
             self.sub_model: Model = self.model
@@ -240,14 +240,12 @@ def _parse(schema: Any, answer: Any) -> Any:
     """Build an instance of the caller's schema class from a validated answer."""
     if schema is None or isinstance(schema, dict) or not isinstance(schema, type):
         return None
+    if not (hasattr(schema, "model_validate") or dataclasses.is_dataclass(schema)):
+        return None
     try:
-        if hasattr(schema, "model_validate"):
-            return schema.model_validate(answer)
-        if dataclasses.is_dataclass(schema) and isinstance(answer, dict):
-            return schema(**answer)
+        return build(schema, answer)
     except Exception:  # noqa: BLE001 - the raw answer is still available
         return None
-    return None
 
 
 def build_config(config: Config | None, options: dict[str, Any]) -> Config:

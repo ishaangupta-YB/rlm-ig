@@ -17,3 +17,4 @@ Developed and tested on Linux. macOS should behave the same. On Windows, use WSL
 - [Tracing](tracing.md): the trace file format, `rlm trace`, HTML reports, event callbacks, verbosity.
 - [Security](security.md): what the sandbox does and does not do, and how to isolate the worker properly.
 - [Troubleshooting](troubleshooting.md): symptoms and fixes, and how to read a trace to see what went wrong.
+- [Visual explainer](explainer.html): one self-contained HTML page with an animated replay of a real run, the architecture and data flow, the trade-offs against plain LLM calls, agents and RAG, and production guidance. Download it and open it in a browser; GitHub shows HTML as source.

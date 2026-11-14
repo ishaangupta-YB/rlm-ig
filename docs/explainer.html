@@ -1,0 +1,1123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="How rlm-ig runs recursive language models over a Python REPL: architecture, data flow, trade-offs and production guidance.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23008a7a'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='15' font-weight='700' fill='white' text-anchor='middle'%3E%3E_%3C/text%3E%3C/svg%3E">
+<title>Inside rlm-ig</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,650;12..96,750&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout concept: a long engineering explainer that reads like an annotated trace.
+   Left rail = table of contents, right = sections. One orchestrated moment at the top
+   (a replay of a real run), then static diagrams whose colors always mean the same part:
+   teal = host engine, amber = model, cobalt = REPL worker, plum = sub-agent, crimson = budget. */
+:root{
+  --bg:#f3f6f5; --surface:#ffffff; --surface-2:#e8eeec; --line:#cdd8d4; --ink:#13231f; --dim:#52645d; --faint:#8a9a94;
+  --host:#008a7a; --model:#c06a00; --repl:#3456c4; --child:#7d3aa8; --budget:#c41f4a;
+  --good:#1f7a3a; --warn:#a35a00;
+  --code-bg:#0f1a17; --code-ink:#d9e7e2; --code-dim:#7f948d;
+  --display:"Bricolage Grotesque", "IBM Plex Sans", system-ui, sans-serif;
+  --body:"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono:"JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --r:10px;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0e1412; --surface:#141c19; --surface-2:#1a2521; --line:#2a3833; --ink:#e3ece8; --dim:#9aaca5; --faint:#6b7d76;
+  --host:#27a896; --model:#c97d1a; --repl:#6a8cf2; --child:#b673de; --budget:#ec5a74;
+  --good:#5cc27a; --warn:#e0a24a;
+  --code-bg:#09100e; --code-ink:#d9e7e2; --code-dim:#7f948d; color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#0e1412; --surface:#141c19; --surface-2:#1a2521; --line:#2a3833; --ink:#e3ece8; --dim:#9aaca5; --faint:#6b7d76;
+  --host:#27a896; --model:#c97d1a; --repl:#6a8cf2; --child:#b673de; --budget:#ec5a74;
+  --good:#5cc27a; --warn:#e0a24a;
+  --code-bg:#09100e; --code-ink:#d9e7e2; --code-dim:#7f948d; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg); color:var(--ink); font-family:var(--body); font-size:16px; line-height:1.6;
+  padding-left:max(16px, env(safe-area-inset-left, 0px)); padding-right:max(16px, env(safe-area-inset-right, 0px)); padding-block:0 64px;}
+a{color:var(--host); text-underline-offset:2px}
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible{outline:2px solid var(--host); outline-offset:2px; border-radius:4px}
+code, kbd, .mono{font-family:var(--mono); font-size:.88em}
+p code, li code, td code, figcaption code, dd code{background:var(--surface-2); padding:1px 5px; border-radius:4px; overflow-wrap:anywhere}
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; line-height:1.15; margin:0}
+h2{font-size:clamp(1.6rem, 1.2rem + 1.4vw, 2.25rem); font-weight:750; letter-spacing:-.01em}
+h3{font-size:1.2rem; font-weight:650; margin-top:4px}
+p{margin:0}
+.eyebrow{font-family:var(--mono); font-size:.72rem; letter-spacing:.12em; text-transform:uppercase; color:var(--dim)}
+.wrap{max-width:1280px; margin:0 auto; display:grid; grid-template-columns:220px minmax(0,1fr); gap:48px}
+@media (max-width: 980px){ .wrap{grid-template-columns:minmax(0,1fr); gap:0} }
+
+/* table of contents */
+nav.toc{position:sticky; top:env(safe-area-inset-top, 0px); align-self:start; padding-block:28px; max-height:100vh; overflow:auto}
+nav.toc ol{list-style:none; margin:10px 0 0; padding:0; display:grid; gap:2px; counter-reset:t}
+nav.toc a{display:block; padding:4px 10px; border-radius:6px; color:var(--dim); text-decoration:none; font-size:.86rem; line-height:1.35}
+nav.toc a:hover{background:var(--surface-2); color:var(--ink)}
+nav.toc a.on{color:var(--ink); background:var(--surface); box-shadow:inset 2px 0 0 var(--host)}
+@media (max-width: 980px){
+  body::before{content:""; position:fixed; inset:0 0 auto; height:env(safe-area-inset-top, 0px); z-index:10; background:var(--bg)}
+  nav.toc{position:sticky; z-index:5; background:var(--bg); padding-block:8px; margin-inline:calc(-1 * max(16px, env(safe-area-inset-left, 0px))); padding-inline:max(16px, env(safe-area-inset-left, 0px)); border-bottom:1px solid var(--line); max-height:none}
+  nav.toc .eyebrow{display:none}
+  nav.toc ol{display:flex; overflow-x:auto; gap:4px; margin:0; scrollbar-width:none}
+  nav.toc a{white-space:nowrap}
+}
+main{min-width:0; padding-top:28px}
+section{padding-block:56px 8px; border-top:1px solid var(--line); scroll-margin-top:60px}
+section:first-of-type{border-top:0; padding-top:8px}
+.sec-head{display:grid; gap:8px; margin-bottom:22px; max-width:72ch}
+.lede{font-size:1.08rem; color:var(--dim); max-width:68ch}
+.prose{display:grid; gap:14px; max-width:70ch}
+.prose ul, .prose ol{margin:0; padding-left:1.25em; display:grid; gap:6px}
+.grid2{display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:18px}
+.grid3{display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:16px}
+@media (max-width: 760px){ .grid2, .grid3{grid-template-columns:minmax(0,1fr)} }
+.card{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:16px 18px; min-width:0; display:grid; gap:8px; align-content:start}
+.card h4{font-size:1rem; font-weight:650; display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+.card p, .card li{color:var(--dim); font-size:.94rem}
+.card ul{margin:0; padding-left:1.1em; display:grid; gap:4px}
+.path{font-family:var(--mono); font-size:.74rem; color:var(--faint)}
+.chip{font-family:var(--mono); font-size:.7rem; padding:2px 7px; border-radius:99px; border:1px solid currentColor; letter-spacing:.02em; white-space:nowrap}
+.c-host{color:var(--host)} .c-model{color:var(--model)} .c-repl{color:var(--repl)} .c-child{color:var(--child)} .c-budget{color:var(--budget)}
+.dot{width:10px; height:10px; border-radius:3px; display:inline-block; flex:none}
+.d-host{background:var(--host)} .d-model{background:var(--model)} .d-repl{background:var(--repl)} .d-child{background:var(--child)} .d-budget{background:var(--budget)}
+pre.code{background:var(--code-bg); color:var(--code-ink); border-radius:var(--r); padding:14px 16px; overflow-x:auto; font-family:var(--mono); font-size:.8rem; line-height:1.55; margin:0}
+pre.code .d{color:var(--code-dim)}
+pre.code .k{color:#7fd1c3} pre.code .s{color:#f0c27a} pre.code .n{color:#a9b9ff}
+figure{margin:0; display:grid; gap:10px}
+figcaption{font-size:.88rem; color:var(--dim); max-width:72ch}
+.fig-box{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:14px; overflow-x:auto}
+.legend{display:flex; flex-wrap:wrap; gap:14px; font-size:.82rem; color:var(--dim)}
+.legend span{display:inline-flex; align-items:center; gap:6px}
+.tbl{overflow-x:auto; border:1px solid var(--line); border-radius:var(--r); background:var(--surface)}
+table{border-collapse:collapse; width:100%; font-size:.9rem}
+th, td{text-align:left; vertical-align:top; padding:10px 12px; border-bottom:1px solid var(--line); overflow-wrap:break-word}
+th{font-family:var(--mono); font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); font-weight:500; background:var(--surface-2)}
+tr:last-child td{border-bottom:0}
+td.num, th.num{text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap}
+.callout{border:1px solid var(--line); border-left:3px solid var(--host); background:var(--surface); border-radius:6px; padding:12px 16px; display:grid; gap:6px; max-width:72ch}
+.callout.warn{border-left-color:var(--budget)}
+.callout.amber{border-left-color:var(--model)}
+.callout b{font-family:var(--display); font-weight:650}
+.stack{display:grid; gap:22px}
+.pill{display:inline-block; font-family:var(--mono); font-size:.72rem; padding:2px 8px; border-radius:99px; font-weight:500}
+.p-win{background:color-mix(in oklab, var(--good) 16%, transparent); color:var(--good)}
+.p-lose{background:color-mix(in oklab, var(--budget) 14%, transparent); color:var(--budget)}
+.p-mid{background:color-mix(in oklab, var(--warn) 16%, transparent); color:var(--warn)}
+
+/* hero */
+.hero{display:grid; gap:14px; padding-bottom:18px}
+.hero h1{font-size:clamp(2.2rem, 1.4rem + 3.2vw, 3.8rem); font-weight:750; letter-spacing:-.02em; max-width:18ch}
+.hero .lede{font-size:1.15rem}
+.facts{display:flex; flex-wrap:wrap; gap:8px 18px; font-family:var(--mono); font-size:.78rem; color:var(--dim)}
+.facts b{color:var(--ink); font-weight:600}
+
+/* replay */
+.replay{display:grid; grid-template-columns:minmax(0,1.05fr) minmax(0,1fr); gap:16px; margin-top:8px}
+@media (max-width: 1100px){ .replay{grid-template-columns:minmax(0,1fr)} }
+.term{background:var(--code-bg); color:var(--code-ink); border-radius:var(--r); font-family:var(--mono); font-size:.76rem; line-height:1.55; display:grid; grid-template-rows:auto 1fr; min-height:360px; overflow:hidden; min-width:0}
+.term-bar{display:flex; justify-content:space-between; align-items:center; padding:8px 12px; border-bottom:1px solid #22302b; color:var(--code-dim); font-size:.72rem}
+.term-body{padding:10px 12px; overflow:auto; max-height:470px; white-space:pre-wrap; overflow-wrap:anywhere; scroll-behavior:smooth}
+.term-body .l{display:block; animation:in .25s ease-out both}
+.term-body .r{color:#7fd1c3} .term-body .c{color:#8796a0} .term-body .o{color:#d9e7e2} .term-body .a{color:#f0b35a} .term-body .g{color:#8ad89a} .term-body .p{color:#d3a6f0} .term-body .h{color:#b9c8c2}
+@keyframes in{from{opacity:0; transform:translateY(3px)} to{opacity:1; transform:none}}
+.stage{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:12px; display:grid; gap:10px; min-width:0}
+.stage svg{width:100%; height:auto; display:block}
+.controls{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+.btn{font:inherit; font-size:.85rem; border:1px solid var(--line); background:var(--surface-2); color:var(--ink); padding:6px 12px; border-radius:7px; cursor:pointer}
+.btn:hover{border-color:var(--host)}
+.btn.primary{background:var(--host); color:#fff; border-color:var(--host)}
+.progress{flex:1 1 140px; height:6px; background:var(--surface-2); border-radius:99px; overflow:hidden; min-width:100px}
+.progress i{display:block; height:100%; width:0; background:var(--host); transition:width .3s}
+.stepnote{display:grid; gap:4px; min-height:118px}
+.stepnote h4{font-family:var(--display); font-weight:650; font-size:1.02rem}
+.stepnote p{color:var(--dim); font-size:.9rem}
+.stepnote .path{margin-top:2px}
+
+/* svg diagram parts */
+.nbox rect{stroke-width:1.5}
+.nb-host rect{fill:color-mix(in oklab, var(--host) 12%, var(--surface)); stroke:var(--host)}
+.nb-model rect{fill:color-mix(in oklab, var(--model) 12%, var(--surface)); stroke:var(--model)}
+.nb-repl rect{fill:color-mix(in oklab, var(--repl) 12%, var(--surface)); stroke:var(--repl)}
+.nb-child rect{fill:color-mix(in oklab, var(--child) 12%, var(--surface)); stroke:var(--child)}
+.nb-budget rect{fill:color-mix(in oklab, var(--budget) 10%, var(--surface)); stroke:var(--budget)}
+.nb-plain rect{fill:var(--surface-2); stroke:var(--line)}
+.nbox.dim{opacity:.35; transition:opacity .3s}
+.nbox{transition:opacity .3s}
+.nbox.lit rect{stroke-width:2.6}
+svg text{fill:var(--ink); font-family:var(--body)}
+svg .t-title{font-family:var(--display); font-weight:650; font-size:14px}
+svg .t-sub{font-family:var(--mono); font-size:10.5px; fill:var(--dim)}
+svg .t-lab{font-family:var(--mono); font-size:10px; fill:var(--dim)}
+svg .t-big{font-family:var(--mono); font-size:18px; font-weight:600}
+.edge{fill:none; stroke:var(--line); stroke-width:2}
+.edge.lit{stroke:var(--ink); stroke-width:2.4}
+.e-host{stroke:var(--host)} .e-model{stroke:var(--model)} .e-repl{stroke:var(--repl)} .e-child{stroke:var(--child)} .e-budget{stroke:var(--budget)}
+.packet{stroke:var(--surface); stroke-width:2}
+.hoplabel{font-family:var(--mono); font-size:10.5px; paint-order:stroke; stroke:var(--surface); stroke-width:4px; fill:var(--ink)}
+.arrowhead{fill:var(--faint)}
+
+/* comparison */
+.vs{display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:16px}
+@media (max-width: 760px){ .vs{grid-template-columns:minmax(0,1fr)} }
+.vs .card h4 .chip{margin-left:auto}
+.flow{display:grid; gap:6px; font-family:var(--mono); font-size:.78rem}
+.flow div{padding:8px 10px; border-radius:6px; background:var(--surface-2); color:var(--ink); overflow-wrap:anywhere}
+.flow .big{background:color-mix(in oklab, var(--budget) 14%, var(--surface)); }
+.flow .ok{background:color-mix(in oklab, var(--host) 14%, var(--surface)); }
+.flow .arrow{background:none; color:var(--faint); padding:0 10px}
+.bars{display:grid; gap:14px}
+.bar-row{display:grid; grid-template-columns:minmax(0, 210px) minmax(0,1fr); gap:12px; align-items:center}
+@media (max-width: 560px){ .bar-row{grid-template-columns:minmax(0,1fr)} }
+.bar-row .lab{font-size:.88rem}
+.bar-row .lab small{display:block; color:var(--dim); font-size:.78rem}
+.bar-track{position:relative; height:28px}
+.bar{height:100%; border-radius:0 4px 4px 0; background:var(--host); position:relative; cursor:default}
+.bar.est{background:repeating-linear-gradient(135deg, color-mix(in oklab, var(--host) 55%, var(--surface)) 0 6px, color-mix(in oklab, var(--host) 30%, var(--surface)) 6px 12px)}
+.bar-val{position:absolute; left:calc(100% + 8px); top:50%; transform:translateY(-50%); font-family:var(--mono); font-size:.8rem; white-space:nowrap; color:var(--ink)}
+.tip{position:fixed; pointer-events:none; background:var(--ink); color:var(--bg); font-size:.78rem; padding:6px 9px; border-radius:6px; max-width:260px; z-index:20; opacity:0; transition:opacity .12s}
+
+/* batching calculator */
+.calc{display:grid; grid-template-columns:minmax(0, 300px) minmax(0,1fr); gap:18px}
+@media (max-width: 860px){ .calc{grid-template-columns:minmax(0,1fr)} }
+.calc label{display:grid; gap:4px; font-size:.86rem; color:var(--dim)}
+.calc input[type=range]{width:100%; accent-color:var(--host)}
+.calc output{font-family:var(--mono); color:var(--ink); font-size:.86rem}
+.presets{display:flex; flex-wrap:wrap; gap:6px}
+.presets .btn{font-size:.78rem; padding:4px 9px}
+.cells{display:flex; flex-wrap:wrap; gap:6px; align-content:flex-start; max-height:300px; overflow:auto; padding:2px}
+.grp{display:flex; flex-wrap:wrap; gap:2px; padding:4px; border-radius:5px; border:1px solid var(--host); background:color-mix(in oklab, var(--host) 8%, var(--surface)); max-width:100%}
+.grp.solo{border-color:var(--model); background:color-mix(in oklab, var(--model) 10%, var(--surface))}
+.grp i{width:8px; height:8px; border-radius:2px; background:var(--host); display:block}
+.grp.solo i{background:var(--model)}
+.kpis{display:flex; flex-wrap:wrap; gap:10px 26px}
+.kpi{display:grid}
+.kpi b{font-family:var(--mono); font-size:1.5rem; font-variant-numeric:tabular-nums; font-weight:600}
+.kpi span{font-size:.78rem; color:var(--dim)}
+
+/* tree frames */
+.frames{display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+.verdict{display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:14px}
+@media (max-width: 860px){ .verdict{grid-template-columns:minmax(0,1fr)} }
+.verdict .card{border-top:3px solid var(--line)}
+.verdict .card.v-good{border-top-color:var(--good)}
+.verdict .card.v-mid{border-top-color:var(--warn)}
+.verdict .card.v-bad{border-top-color:var(--budget)}
+details{border:1px solid var(--line); border-radius:8px; background:var(--surface); padding:10px 14px}
+details summary{cursor:pointer; font-weight:600}
+details[open] summary{margin-bottom:8px}
+dl.kv{display:grid; grid-template-columns:minmax(0,180px) minmax(0,1fr); gap:6px 16px; margin:0; font-size:.9rem}
+dl.kv dt{font-family:var(--mono); font-size:.8rem; color:var(--dim)}
+dl.kv dd{margin:0}
+@media (max-width: 560px){ dl.kv{grid-template-columns:minmax(0,1fr)} dl.kv dd{margin-bottom:6px} }
+footer{margin-top:48px; color:var(--faint); font-size:.82rem; max-width:72ch}
+@media (prefers-reduced-motion: reduce){ *{animation:none !important; transition:none !important; scroll-behavior:auto !important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="toc" aria-label="Contents">
+  <div class="eyebrow">rlm-ig · main @ 0868b50</div>
+  <ol id="toc">
+    <li><a href="#replay">Watch a run</a></li>
+    <li><a href="#problem">The problem it solves</a></li>
+    <li><a href="#map">Architecture map</a></li>
+    <li><a href="#lifecycle">A run, step by step</a></li>
+    <li><a href="#wire">Inside the REPL worker</a></li>
+    <li><a href="#toolkit">What the model can call</a></li>
+    <li><a href="#fanout">ask, ask_map, batching</a></li>
+    <li><a href="#recursion">Sub-agents and depth</a></li>
+    <li><a href="#budget">Budgets and partial answers</a></li>
+    <li><a href="#resilience">When things break</a></li>
+    <li><a href="#backends">Backends and caching</a></li>
+    <li><a href="#sessions">Sessions</a></li>
+    <li><a href="#observe">Traces and events</a></li>
+    <li><a href="#security">Security model</a></li>
+    <li><a href="#compare">Versus normal LLM use</a></li>
+    <li><a href="#savings">Does it save anything?</a></li>
+    <li><a href="#rag">RAG, triage, small models</a></li>
+    <li><a href="#enterprise">Enterprise and production</a></li>
+    <li><a href="#stress">Weak points</a></li>
+    <li><a href="#origins">Where the idea comes from</a></li>
+  </ol>
+</nav>
+
+<main>
+<!-- ============================================================ HERO / REPLAY -->
+<section id="replay">
+  <div class="hero">
+    <div class="eyebrow">An engine for recursive language models · Python 3.11+ · MIT</div>
+    <h1>The model never reads your data. It writes code that does.</h1>
+    <p class="lede">rlm-ig puts your data in a live Python process as a variable called <code>context</code>. The model sees a short description of it, writes one code block per turn, sees what the code printed, and repeats until it calls <code>submit(answer)</code>. Code does the exact work. Cheaper model calls read the pieces the code picked out. Pieces that are still too big go to sub-agents with their own Python process.</p>
+    <div class="facts"><span><b>7,751</b> lines of Python in src/</span><span><b>0</b> required dependencies</span><span><b>6</b> backend families</span><span>version <b>0.2.0</b></span></div>
+  </div>
+
+  <div class="replay">
+    <div class="term" aria-label="Console output of the run being replayed">
+      <div class="term-bar"><span>$ rlm demo</span><span id="term-step">step 0 of 8</span></div>
+      <div class="term-body" id="term"></div>
+    </div>
+    <div class="stage">
+      <div class="controls">
+        <button class="btn primary" id="play" type="button">Pause</button>
+        <button class="btn" id="back" type="button" aria-label="Previous step">Back</button>
+        <button class="btn" id="next" type="button" aria-label="Next step">Next</button>
+        <button class="btn" id="restart" type="button">Restart</button>
+        <div class="progress" aria-hidden="true"><i id="prog"></i></div>
+      </div>
+      <figure>
+        <div role="img" aria-label="Diagram of one run: the root model talks to the agent loop on the host, which runs code in the REPL worker, serves ask_map calls to sub-models, starts a sub-agent, and charges every model call to the ledger.">
+        <svg id="stage" viewBox="0 0 600 440">
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <path id="e-model" class="edge" d="M135 90 C135 130 240 140 262 170"/>
+          <path id="e-sub" class="edge" d="M338 170 C352 136 462 128 470 90"/>
+          <path id="e-repl" class="edge" d="M300 242 L300 330"/>
+          <path id="e-child" class="edge" d="M410 222 C462 232 495 276 495 318"/>
+          <path id="e-ledger" class="edge" d="M190 222 C140 236 105 288 105 330"/>
+
+          <g class="nbox nb-model" id="n-model"><rect x="30" y="24" width="210" height="66" rx="9"/>
+            <text class="t-title" x="44" y="50">Root model</text><text class="t-sub" x="44" y="70">model= · one long conversation</text></g>
+          <g class="nbox nb-model" id="n-sub"><rect x="378" y="16" width="196" height="66" rx="9" opacity=".55"/><rect x="370" y="24" width="196" height="66" rx="9"/>
+            <text class="t-title" x="384" y="50">Sub-model</text><text class="t-sub" x="384" y="70">sub_model= · one-shot asks</text></g>
+          <g class="nbox nb-host" id="n-host"><rect x="190" y="170" width="220" height="72" rx="9"/>
+            <text class="t-title" x="204" y="197">Agent loop (host)</text><text class="t-sub" x="204" y="216">engine/agent.py · Run · Toolbox</text><text class="t-sub" x="204" y="232" id="host-state">idle</text></g>
+          <g class="nbox nb-budget" id="n-ledger"><rect x="30" y="330" width="150" height="84" rx="9"/>
+            <text class="t-title" x="44" y="354">Ledger</text><text class="t-big" x="44" y="382" id="calls">0</text><text class="t-sub" x="44" y="402">of 300 model calls</text></g>
+          <g class="nbox nb-repl" id="n-repl"><rect x="205" y="330" width="190" height="84" rx="9"/>
+            <text class="t-title" x="219" y="354">REPL worker</text><text class="t-sub" x="219" y="374">context: str</text><text class="t-sub" x="219" y="390">2,432,029 chars</text><text class="t-sub" x="219" y="406" id="repl-vars">vars: none yet</text></g>
+          <g class="nbox nb-child" id="n-child"><rect x="420" y="318" width="160" height="104" rx="9"/>
+            <text class="t-title" x="434" y="342">Sub-agent 0.1</text><text class="t-sub" x="434" y="362">own loop, own REPL</text><text class="t-sub" x="434" y="378">context: list</text><text class="t-sub" x="434" y="394">21,735 chars</text><text class="t-sub" x="434" y="410" id="child-state">not started</text></g>
+          <g id="packets"></g>
+        </svg>
+        </div>
+        <figcaption>Each step replays the real <code>rlm demo</code> run on main. Colors stay fixed across the page: <span class="c-model">amber</span> is a model, <span class="c-host">teal</span> is the host engine, <span class="c-repl">cobalt</span> is the REPL worker, <span class="c-child">plum</span> is a sub-agent, <span class="c-budget">crimson</span> is the budget.</figcaption>
+      </figure>
+      <div class="stepnote" aria-live="polite"><h4 id="sn-title"></h4><p id="sn-text"></p><div class="path" id="sn-path"></div></div>
+    </div>
+  </div>
+  <p class="lede" style="margin-top:14px">The demo uses a scripted stand-in for the model, so it needs no credentials, but everything else is the real engine: the real worker process, real batching, a real sub-agent. Task: <em>"Which service had the most payment failures in this log, and what was the most common failure reason for it?"</em> over 40,000 synthetic log lines.</p>
+</section>
+
+<!-- ============================================================ PROBLEM -->
+<section id="problem">
+  <div class="sec-head"><div class="eyebrow">Why it exists</div><h2>The problem it solves</h2>
+  <p class="lede">A model handed a large log either cannot fit it or reads it badly. Exact questions (counts, top-N, joins) are the worst case, because reading is the wrong tool for counting.</p></div>
+
+  <div class="vs">
+    <div class="card"><h4><span class="dot d-budget"></span>Normal LLM call <span class="chip c-budget">paste everything</span></h4>
+      <div class="flow">
+        <div>system prompt + question</div>
+        <div class="big">+ all 225,216 chars of OpenSSH_2k.log<br>(about 56,000 tokens at 4 chars per token, likely more for IPs and numbers)</div>
+        <div class="arrow">↓ one request</div>
+        <div>model reads 1,999 lines and tries to tally "Failed password" per IP in its head</div>
+        <div class="arrow">↓</div>
+        <div>an answer that looks right, with counts it cannot have computed exactly</div>
+      </div>
+      <p>Every follow-up question sends the log again unless the provider caches it. A 3.7 MB file (the README's CLI test) would be roughly 900,000 tokens and does not fit at all.</p>
+    </div>
+    <div class="card"><h4><span class="dot d-host"></span>rlm-ig <span class="chip c-host">real run from the README</span></h4>
+      <div class="flow">
+        <div>system prompt (4,070 chars, the same for every agent) + question + a summary of <code>context</code> under 1,300 chars</div>
+        <div class="arrow">↓ code, not reading</div>
+        <div class="ok">the model writes a regex and counts in Python; the REPL scans all 1,999 lines in milliseconds</div>
+        <div class="arrow">↓ submit</div>
+        <div class="ok">183.62.140.253: 286, 187.141.143.180: 80, 103.99.0.122: 46, 112.95.230.3: 26, 5.188.10.180: 18</div>
+      </div>
+      <p>3 calls, 11k input tokens (6.8k served from cache), 665 output tokens, $0.0013, 5.9 s on Claude Code with Haiku. I re-ran the grep pipeline from the README on the same file and got the same five counts.</p>
+    </div>
+  </div>
+
+  <figure style="margin-top:22px">
+    <div class="fig-box">
+      <div class="bars" id="tokbars" role="img" aria-label="Input tokens per question: about 56,000 when the whole log is pasted versus 11,000 in the measured rlm-ig run.">
+        <div class="bar-row"><div class="lab">Paste the whole log<small>estimate, chars ÷ 4</small></div><div class="bar-track"><div class="bar est" style="width:78%" data-tip="225,216 chars ÷ 4 ≈ 56,300 input tokens. Real tokenizers usually split IP addresses and timestamps into more tokens, so this is a floor."><span class="bar-val">≈ 56,300 tokens</span></div></div></div>
+        <div class="bar-row"><div class="lab">rlm-ig, measured<small>3 calls, Claude Code + Haiku</small></div><div class="bar-track"><div class="bar" style="width:15.2%" data-tip="11,000 input tokens across 3 calls, of which 6,800 were cache reads. 665 output tokens. Reported cost $0.0013."><span class="bar-val">11,000 tokens (6,800 cached)</span></div></div></div>
+      </div>
+    </div>
+    <figcaption>Input tokens for one question over <code>OpenSSH_2k.log</code> from Loghub. The striped bar is an estimate, the solid bar is the measured run quoted in the README. The bigger win is not tokens, it is that the answer was computed instead of guessed.</figcaption>
+  </figure>
+
+  <div class="callout amber" style="margin-top:18px"><b>The core trade</b><p>A plain call spends tokens to read data once, in one pass, and answers immediately. rlm-ig spends extra turns (each one a round trip of 1 to 3 seconds) to avoid reading most of the data at all. That trade pays off when the data is large and the question can be answered by code. It loses when the data is small or the question needs every word read.</p></div>
+</section>
+
+<!-- ============================================================ MAP -->
+<section id="map">
+  <div class="sec-head"><div class="eyebrow">Architecture</div><h2>Architecture map</h2>
+  <p class="lede">Four layers: an entry layer (Python API, CLI, sessions), the engine (one shared <code>Run</code>, one <code>Agent</code> per agent), the sandbox (a host proxy plus a worker subprocess), and pluggable model backends. Events fan out to the console, the JSONL trace and your callback.</p></div>
+
+  <figure>
+    <div class="fig-box" role="img" aria-label="Layered architecture: entry points create an Engine, which builds a Run and a root Agent. The Agent owns a Chat with a model backend and a Sandbox that talks to a worker subprocess over pipes. Sub-agents are more Agents sharing the same Run. Events go to console, trace and callbacks.">
+    <svg viewBox="0 0 980 560" style="min-width:760px">
+      <defs><marker id="ah2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+      <!-- entry -->
+      <g class="nbox nb-plain"><rect x="20" y="20" width="300" height="70" rx="8"/><text class="t-title" x="34" y="46">rlm.run / arun</text><text class="t-sub" x="34" y="66">api.py · returns Result, never raises</text><text class="t-sub" x="34" y="80">for in-run failures</text></g>
+      <g class="nbox nb-plain"><rect x="340" y="20" width="300" height="70" rx="8"/><text class="t-title" x="354" y="46">rlm CLI</text><text class="t-sub" x="354" y="66">cli.py · run, doctor, trace, demo</text><text class="t-sub" x="354" y="80">exit 0 ok · 2 partial · 1 failed</text></g>
+      <g class="nbox nb-plain"><rect x="660" y="20" width="300" height="70" rx="8"/><text class="t-title" x="674" y="46">Session</text><text class="t-sub" x="674" y="66">session.py · keeps one sandbox alive</text><text class="t-sub" x="674" y="80">across tasks, optional save to disk</text></g>
+      <!-- engine -->
+      <g class="nbox nb-host"><rect x="20" y="130" width="300" height="84" rx="8"/><text class="t-title" x="34" y="156">Engine</text><text class="t-sub" x="34" y="176">resolve "provider:model" → Model</text><text class="t-sub" x="34" y="192">Toolbox (your functions + MCP)</text><text class="t-sub" x="34" y="208">Config from rlm.toml / env / kwargs</text></g>
+      <g class="nbox nb-host"><rect x="340" y="130" width="300" height="84" rx="8"/><text class="t-title" x="354" y="156">Run (one per question)</text><text class="t-sub" x="354" y="176">turn() · ask() · ask_batch()</text><text class="t-sub" x="354" y="192">request_slots + agent_slots semaphores</text><text class="t-sub" x="354" y="208">sandbox factory, call ids</text></g>
+      <g class="nbox nb-budget"><rect x="660" y="130" width="300" height="84" rx="8"/><text class="t-title" x="674" y="156">Ledger</text><text class="t-sub" x="674" y="176">budget.py · reserve() before every call</text><text class="t-sub" x="674" y="192">record() after · per-model usage</text><text class="t-sub" x="674" y="208">allow_grace(1) for the root's wrap-up</text></g>
+      <!-- agent -->
+      <g class="nbox nb-host"><rect x="20" y="256" width="460" height="96" rx="8"/><text class="t-title" x="34" y="282">Agent (root = depth 0, id "0")</text><text class="t-sub" x="34" y="302">engine/agent.py · _loop(): send message → extract code → run cell</text><text class="t-sub" x="34" y="318">→ observation or schema feedback → repeat until submit</text><text class="t-sub" x="34" y="334">_on_call(): serves ask / ask_map / delegate / delegate_map / tool</text></g>
+      <g class="nbox nb-child"><rect x="500" y="256" width="460" height="96" rx="8"/><text class="t-title" x="514" y="282">Sub-agents (ids "0.1", "0.1.2", …)</text><text class="t-sub" x="514" y="302">the same Agent class at depth + 1, same Run and Ledger</text><text class="t-sub" x="514" y="318">own Chat on sub_model, own Sandbox, own context</text><text class="t-sub" x="514" y="334">at depth == max_depth: DelegationRefused</text></g>
+      <!-- backends + sandbox -->
+      <g class="nbox nb-model"><rect x="20" y="394" width="300" height="96" rx="8"/><text class="t-title" x="34" y="420">Model / Chat</text><text class="t-sub" x="34" y="440">models/base.py · chat(system).send(msg)</text><text class="t-sub" x="34" y="456">claude-code · opencode · anthropic</text><text class="t-sub" x="34" y="472">openai-compatible · command · scripted</text></g>
+      <g class="nbox nb-repl"><rect x="340" y="394" width="300" height="96" rx="8"/><text class="t-title" x="354" y="420">Sandbox (host side)</text><text class="t-sub" x="354" y="440">sandbox/host.py · spawn, run(code),</text><text class="t-sub" x="354" y="456">serve calls, cell timeout, restart</text><text class="t-sub" x="354" y="472">optional launcher: docker / podman</text></g>
+      <g class="nbox nb-repl"><rect x="660" y="394" width="300" height="96" rx="8"/><text class="t-title" x="674" y="420">Worker subprocess</text><text class="t-sub" x="674" y="440">sandbox/worker.py · stdlib only, Py 3.8+</text><text class="t-sub" x="674" y="456">namespace with context, helpers,</text><text class="t-sub" x="674" y="472">output capture, snapshot / restore</text></g>
+      <!-- events -->
+      <g class="nbox nb-plain"><rect x="20" y="510" width="940" height="38" rx="8"/><text class="t-sub" x="34" y="534" style="fill:var(--ink)">Events (engine/events.py): run.start · agent.start · model.reply · cell.start · cell · call.start · call.end · note · agent.end · run.end  →  Console · TraceWriter (JSONL) · on_event</text></g>
+      <!-- arrows -->
+      <path class="edge" marker-end="url(#ah2)" d="M170 90 V128"/><path class="edge" marker-end="url(#ah2)" d="M490 90 C490 110 250 108 250 128"/><path class="edge" marker-end="url(#ah2)" d="M810 90 C810 112 300 104 290 128"/>
+      <path class="edge" marker-end="url(#ah2)" d="M320 172 H338"/><path class="edge" marker-end="url(#ah2)" d="M640 172 H658"/>
+      <path class="edge" marker-end="url(#ah2)" d="M490 214 C490 236 250 232 250 254"/>
+      <path class="edge e-child" marker-end="url(#ah2)" d="M480 304 H498"/>
+      <path class="edge e-model" marker-end="url(#ah2)" d="M170 352 V392"/><path class="edge e-repl" marker-end="url(#ah2)" d="M380 352 C380 372 470 372 470 392"/>
+      <path class="edge e-repl" marker-end="url(#ah2)" d="M640 442 H658"/><text class="t-lab" x="596" y="434">pipes</text>
+    </svg>
+    </div>
+    <figcaption>Every agent, root or sub-agent, is the same class driving the same loop. What differs is depth, which model it uses (<code>model</code> for the root, <code>sub_model</code> below), and the data it was given. All agents in one run share one <code>Run</code>, so one ledger and one pair of concurrency pools govern the whole tree.</figcaption>
+  </figure>
+
+  <div class="grid3" style="margin-top:18px">
+    <div class="card"><h4><span class="dot d-host"></span>Engine and Run</h4><div class="path">api.py · engine/run.py</div><p><code>Engine</code> resolves models once and can be reused (sessions do). <code>Run</code> is per question: it owns the ledger, the two semaphores, the temporary work directory (<code>rlm-run-*/agent-&lt;id&gt;</code>) and the three model entry points: <code>turn</code> for agent turns, <code>ask</code> and <code>ask_batch</code> for sub-model calls.</p></div>
+    <div class="card"><h4><span class="dot d-host"></span>Agent</h4><div class="path">engine/agent.py</div><p>The loop and the call server. It extracts code from each reply, runs it, formats what came back, validates submissions against the schema, and handles calls that the running code makes back into the host. It also enforces depth, the pass-through guard and slot handover for children.</p></div>
+    <div class="card"><h4><span class="dot d-model"></span>Prompts</h4><div class="path">engine/prompts.py</div><p>Every word the model sees. One fixed system prompt for all agents (so a provider can cache it across the tree), an opening message built per agent, an observation format with a turn footer, and the wrap-up texts <code>LAST_CALL</code> and <code>BUDGET_SPENT</code>.</p></div>
+    <div class="card"><h4><span class="dot d-repl"></span>Sandbox and worker</h4><div class="path">sandbox/host.py · sandbox/worker.py</div><p>The host side spawns the worker, ships it its own source over stdin, frames JSON messages, enforces <code>cell_timeout</code> and replaces a dead worker. The worker holds the namespace and the REPL helpers and asks the host for every model or tool call.</p></div>
+    <div class="card"><h4><span class="dot d-model"></span>Backends</h4><div class="path">models/*.py</div><p>A <code>Model</code> hands out <code>Chat</code> objects with one method that matters: <code>send(text) → Reply</code>. HTTP backends keep history in-process (<code>StatelessChat</code>); Claude Code and opencode keep it inside the external agent's session and only receive the new message.</p></div>
+    <div class="card"><h4><span class="dot d-budget"></span>Support modules</h4><div class="path">schema.py · text.py · tools/ · trace/ · loaders.py</div><p>A small JSON Schema validator with no dependencies, code extraction and repair, tool wrapping and an MCP client (stdio and HTTP), JSONL trace writer with terminal and HTML viewers, and file loaders (<code>.json</code>, <code>.jsonl</code>, <code>.csv</code>, <code>.tsv</code>, directories).</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ LIFECYCLE -->
+<section id="lifecycle">
+  <div class="sec-head"><div class="eyebrow">Control flow</div><h2>A run, step by step</h2>
+  <p class="lede">This is the order things happen in when you call <code>rlm.run(task, context)</code>. File references point at main.</p></div>
+
+  <div class="stack">
+    <ol class="prose" style="max-width:none; gap:14px; padding-left:1.4em">
+      <li><b>Configuration.</b> <code>Config.load()</code> layers defaults, the user config, the nearest <code>rlm.toml</code>, <code>RLM_*</code> environment variables and your keyword arguments. With no model set, <code>detect()</code> picks Claude Code if <code>claude</code> is on PATH, then opencode, then the Anthropic API if a key and the SDK exist. <span class="path">config.py · models/__init__.py</span></li>
+      <li><b>Engine and Run.</b> The <code>Engine</code> resolves <code>model</code> and <code>sub_model</code> (the same object if equal), connects MCP servers if any, and builds the event sinks. A fresh <code>Run</code> gets a <code>Ledger</code> with your limits and two semaphores sized to <code>max_parallel</code> or the smaller backend default (4 for Claude Code, 8 for APIs). <span class="path">api.py:114 · engine/run.py:24</span></li>
+      <li><b>Worker start.</b> The root <code>Agent</code> asks the run for a sandbox. The host starts <code>python -u -c &lt;bootstrap&gt; &lt;n&gt;</code>, writes the worker's own source (about 32 KB) as the first bytes on stdin, then an <code>init</code> frame with the encoded <code>context</code>, tool signatures and settings. The worker builds its namespace and answers <code>ready</code> with a structural summary. About 50 ms locally. <span class="path">sandbox/host.py:219</span></li>
+      <li><b>The opening message.</b> The model gets one message: <code>## Task</code>, <code>## Data</code> (the summary, never the data), optional <code>## Earlier in this session</code>, <code>## Tools</code>, <code>## Answer format</code>, and <code>## Limits</code>. <span class="path">engine/prompts.py:118</span></li>
+      <li><b>Turn.</b> <code>Run.turn()</code> reserves one call in the ledger, waits for a request slot, sends, records tokens and cost, and emits <code>model.reply</code>. <span class="path">engine/run.py:84</span></li>
+      <li><b>Extract code.</b> The engine takes fenced blocks tagged <code>python</code> (also <code>py</code>, <code>python3</code>, <code>repl</code>, <code>ipython</code>, <code>pycon</code>), joins them, and repairs common damage if the result would not compile. No code means "nothing ran" and the turn is spent. <span class="path">text.py:110</span></li>
+      <li><b>Run the cell.</b> The host sends an <code>exec</code> frame. While the cell runs, the worker may send <code>call</code> frames (ask, delegate, tools); the host serves each one concurrently and answers with a <code>reply</code> frame. The cell ends with a <code>done</code> frame carrying stdout, any traceback, and whether <code>submit</code> was called. <span class="path">sandbox/host.py:280</span></li>
+      <li><b>Observe.</b> Output is cut to 8,000 characters (60% head, 40% tail) and a footer like <code>[turn 2 of 20 · 0.0s]</code> is added. Near the end the footer counts down the remaining turns. <span class="path">engine/prompts.py:169</span></li>
+      <li><b>Submit.</b> <code>submit(value)</code> raises a private exception inside the cell, so nothing after it runs. The value is reduced to JSON, validated against your schema, and either returned or sent back with the validation errors. <span class="path">sandbox/worker.py · engine/agent.py:187</span></li>
+      <li><b>Result.</b> The engine fills a <code>Result</code> with answer, status (<code>ok</code>, <code>partial</code>, <code>failed</code>), usage per model, step and agent counts, seconds, trace path, and <code>parsed</code> (an instance of your dataclass or Pydantic model). Temporary directories are removed. <span class="path">api.py:143</span></li>
+    </ol>
+
+    <div class="grid2">
+      <figure><pre class="code"><span class="d"># The first message an agent gets (real output, from docs/concepts.md)</span>
+## Task
+
+How many users are in the export?
+
+## Data
+
+context: dict, 2 keys
+  ['users'] (list, len 1,000): [{'id': 0, 'name': 'user0'}, ...[+745 chars]
+  ['meta'] (dict, len 1): {'source': 'export'}
+
+## Tools
+
+def price(item: str) -&gt; float
+    Unit price of an item.
+
+## Answer format
+{ "type": "integer" }
+
+## Limits
+
+- 20 turns at most.
+- Output shown per turn: 8,000 characters.
+- One `ask` handles about 400,000 characters of prompt plus data.</pre><figcaption>The data never appears. The summary comes from <code>describe()</code> in the worker: type, size, line count, format hints ("looks like JSON", "first line looks like a delimited header"), and a short start and end.</figcaption></figure>
+      <figure><pre class="code"><span class="d"># What a reply must look like (system prompt, engine/prompts.py)</span>
+I will check the shape of the data first.
+
+```python
+peek()
+print(context[:300])
+```
+
+<span class="d"># What comes back next turn</span>
+context: str, 2,432,029 chars, 40,000 lines
+  starts: '2026-03-01T17:54:59Z invoices INFO ...'
+  ends:   '2026-03-28T09:24:24Z ledger INFO ...'
+2026-03-01T17:54:59Z invoices INFO request ok latency_ms=467
+...
+
+[turn 1 of 20 · 0.0s]</pre><figcaption>The model has no native tools in this conversation, even on Claude Code. The system prompt says so explicitly, and the backends switch the agent's own tools off. One fenced block per reply is the only way to act.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ WIRE -->
+<section id="wire">
+  <div class="sec-head"><div class="eyebrow">Data flow</div><h2>Inside the REPL worker</h2>
+  <p class="lede">The worker is a plain Python process talking to the host over its stdin and stdout. Messages in both directions are an ASCII length, a newline, then that many bytes of UTF-8 JSON.</p></div>
+
+  <figure>
+    <div class="fig-box" role="img" aria-label="Sequence of frames between the agent loop, the sandbox host and the worker during one cell that calls ask_map: exec, call, reserve and sub-model requests, reply, done.">
+    <svg viewBox="0 0 920 520" style="min-width:720px">
+      <defs><marker id="ah3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+      <g class="nbox nb-host"><rect x="20" y="16" width="150" height="40" rx="7"/><text class="t-title" x="34" y="41">Agent._loop</text></g>
+      <g class="nbox nb-host"><rect x="230" y="16" width="170" height="40" rx="7"/><text class="t-title" x="244" y="41">Sandbox (host)</text></g>
+      <g class="nbox nb-repl"><rect x="460" y="16" width="170" height="40" rx="7"/><text class="t-title" x="474" y="41">Worker process</text></g>
+      <g class="nbox nb-model"><rect x="720" y="16" width="180" height="40" rx="7"/><text class="t-title" x="734" y="41">Sub-model</text></g>
+      <path class="edge" d="M95 56 V500" stroke-dasharray="3 4"/><path class="edge" d="M315 56 V500" stroke-dasharray="3 4"/><path class="edge" d="M545 56 V500" stroke-dasharray="3 4"/><path class="edge" d="M810 56 V500" stroke-dasharray="3 4"/>
+      <path class="edge e-host" marker-end="url(#ah3)" d="M95 86 H312"/><text class="t-lab" x="110" y="80">sandbox.run(code, on_call)</text>
+      <path class="edge e-repl" marker-end="url(#ah3)" d="M315 116 H542"/><text class="t-lab" x="330" y="110">{"op":"exec","id":3,"code":"…"}</text>
+      <rect x="545" y="126" width="10" height="250" fill="var(--repl)" opacity=".25"/><text class="t-lab" x="562" y="146">exec() in namespace</text><text class="t-lab" x="562" y="160">stdout → bounded capture</text>
+      <path class="edge e-repl" marker-end="url(#ah3)" d="M545 190 H318"/><text class="t-lab" x="330" y="184">{"op":"call","kind":"ask_map","jobs":[…]}</text>
+      <text class="t-lab" x="562" y="204">cell thread blocks on</text><text class="t-lab" x="562" y="218">threading.Event (no await)</text>
+      <path class="edge e-host" marker-end="url(#ah3)" d="M315 230 H98"/><text class="t-lab" x="110" y="224">on_call("ask_map", msg)</text>
+      <text class="t-lab" x="20" y="252" style="fill:var(--budget)">ledger.reserve() ×2</text>
+      <path class="edge e-model" marker-end="url(#ah3)" d="M95 274 H807"/><text class="t-lab" x="420" y="268">2 requests in parallel (request_slots)</text>
+      <path class="edge e-model" marker-end="url(#ah3)" d="M810 304 H98"/><text class="t-lab" x="420" y="298">2 JSON replies, parsed and validated</text>
+      <path class="edge e-host" marker-end="url(#ah3)" d="M95 334 H542"/><text class="t-lab" x="110" y="328">{"op":"reply","id":1,"ok":true,"value":{"j":[…]}}</text>
+      <path class="edge e-repl" marker-end="url(#ah3)" d="M545 380 H318"/><text class="t-lab" x="330" y="374">{"op":"done","id":3,"stdout":"…","submitted":false}</text>
+      <path class="edge e-host" marker-end="url(#ah3)" d="M315 410 H98"/><text class="t-lab" x="110" y="404">CellResult → observation</text>
+      <text class="t-lab" x="20" y="452">The idle clock for cell_timeout only advances while no call is in flight,</text>
+      <text class="t-lab" x="20" y="468">so time spent waiting on sub-models never counts against the cell.</text>
+      <text class="t-lab" x="20" y="490">A runaway cell gets SIGINT (variables survive), then SIGKILL 5 s later (worker restarted).</text>
+    </svg>
+    </div>
+    <figcaption>One cell that calls <code>ask_map</code>. Model code calls ordinary synchronous functions; the worker turns each one into a <code>call</code> frame and blocks that thread until the matching <code>reply</code>. Calls from several threads are matched by id, so concurrent calls from one cell are possible.</figcaption>
+  </figure>
+
+  <div class="grid2" style="margin-top:18px">
+    <div class="card"><h4>Bootstrap: nothing installed on the far side</h4><p>The command line is <code>[launcher…] python -u -c BOOTSTRAP &lt;len&gt;</code>. The bootstrap is seven lines that read exactly <code>len</code> bytes from fd 0 with unbuffered <code>os.read</code> and <code>exec</code> them. That is the whole worker. Because the source travels over stdin, the same worker runs unchanged inside <code>docker run -i</code>, a jail, or a remote shell, with nothing mounted. The read is exact on purpose: a buffered reader would swallow the first protocol frames.</p><div class="path">sandbox/host.py:31</div></div>
+    <div class="card"><h4>File descriptors: the protocol cannot be corrupted</h4><p>On start the worker duplicates fds 0 and 1 into private protocol streams, points fd 0 at <code>/dev/null</code>, and points fds 1 and 2 at a pipe that a pump thread copies into the capture buffer. So <code>print</code>, C extensions and child processes all land in the cell output and none of them can write into the protocol. A sync marker flushes the pipe before each <code>done</code>.</p><div class="path">sandbox/worker.py · main(), _pump()</div></div>
+    <div class="card"><h4>The trust rule</h4><p>Host to worker may carry pickles (a non-JSON <code>context</code>, a non-JSON tool result), because the host is the trusted side. Worker to host is always JSON: values pass through <code>jsonable()</code>, which unwraps dataclasses, Pydantic models, numpy arrays and dates and degrades anything else to <code>repr</code>. The host never unpickles or evals what a worker sends.</p><div class="path">sandbox/host.py:encode · worker.py:jsonable</div></div>
+    <div class="card"><h4>Output capture</h4><p>The worker keeps the first and last 200,000 characters of a cell's output (<code>capture_limit</code>) and drops the middle with a marker. The host then clips to <code>output_limit</code> (8,000) before the model sees it. The last expression of a cell is echoed with a compact <code>repr</code>, as in a notebook: 30 list items, 600-char strings.</p><div class="path">worker.py:Capture · text.py:clip_middle</div></div>
+  </div>
+</section>
+
+<!-- ============================================================ TOOLKIT -->
+<section id="toolkit">
+  <div class="sec-head"><div class="eyebrow">REPL reference</div><h2>What the model can call</h2>
+  <p class="lede">Everything below is a plain synchronous function in the worker's namespace. The names are reserved; a host tool with one of these names is rejected.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Name</th><th>Runs where</th><th>What it does</th><th>Costs model calls?</th></tr></thead>
+    <tbody>
+      <tr><td><code>context</code></td><td>worker</td><td>Your data: str, dict, list or any picklable object. A directory passed with <code>-f</code> becomes a dict of path to text.</td><td>no</td></tr>
+      <tr><td><code>peek(x)</code></td><td>worker</td><td>Prints the structural summary of any value (<code>context</code> by default).</td><td>no</td></tr>
+      <tr><td><code>grep(pattern, text=context)</code></td><td>worker</td><td>Case-insensitive regex search. Up to 50 <code>Hit(start, end, match, snippet)</code> with 120 chars of surrounding text.</td><td>no</td></tr>
+      <tr><td><code>chunk(text_or_list, size=20000, overlap=0)</code></td><td>worker</td><td>Splits text on a blank line, newline or space found in the last quarter of each window. Groups list items into sub-lists under <code>size</code>.</td><td>no</td></tr>
+      <tr><td><code>ask(prompt, data=None, schema=None)</code></td><td>host → sub-model</td><td>One completion. Returns text, or parsed JSON validated against <code>schema</code> with one repair retry.</td><td>1 (2 with a repair)</td></tr>
+      <tr><td><code>ask_map(prompt, items, schema=None)</code></td><td>host → sub-model</td><td>Same prompt over many items in parallel, batched automatically. Failed items come back as falsy <code>Failed(...)</code>.</td><td>about items ÷ 16 for small items</td></tr>
+      <tr><td><code>delegate(task, data, schema=None, tools=None, whole=False)</code></td><td>host → new Agent</td><td>A sub-agent with its own REPL where <code>data</code> is its <code>context</code>. Returns what it submits.</td><td>one per sub-agent turn, plus its own calls</td></tr>
+      <tr><td><code>delegate_map(task, items)</code></td><td>host → new Agents</td><td>One sub-agent per item, in parallel, bounded by <code>agent_slots</code>.</td><td>sum over sub-agents</td></tr>
+      <tr><td>your tools</td><td>host process</td><td>Functions you pass in (sync or async) or MCP tools named <code>&lt;server&gt;_&lt;tool&gt;</code>. The model sees signature and docstring only.</td><td>no</td></tr>
+      <tr><td><code>submit(value)</code></td><td>worker</td><td>Ends the agent. Rejects functions and modules, validates against the schema.</td><td>no</td></tr>
+      <tr><td><code>SubcallError</code>, <code>BudgetExceeded</code>, <code>DelegationRefused</code>, <code>ToolError</code></td><td>worker</td><td>Exceptions the model's code can catch. The last three are subclasses of <code>SubcallError</code>.</td><td>no</td></tr>
+    </tbody></table></div>
+</section>
+
+<!-- ============================================================ FANOUT -->
+<section id="fanout">
+  <div class="sec-head"><div class="eyebrow">Sub-calls</div><h2>ask, ask_map and automatic batching</h2>
+  <p class="lede"><code>ask</code> is for work that only needs reading: classify this record, extract fields from this chunk. <code>delegate</code> is for work that needs exploring. The engine batches <code>ask_map</code> on its own, which is one of the most useful things in the codebase.</p></div>
+
+  <div class="grid2">
+    <div class="prose">
+      <p>When the model calls <code>ask_map(prompt, items)</code> with one prompt and a list of items, <code>Agent._batches()</code> groups them before any request goes out:</p>
+      <ul>
+        <li>The data budget per call is <code>min(ask_batch_chars, ask_limit − len(prompt) − 2000)</code>, so 24,000 characters by default.</li>
+        <li>Each item costs its length plus 40 characters of wrapper.</li>
+        <li>An item larger than half the budget (12,000) gets a call to itself, so a big chunk is never diluted by neighbours.</li>
+        <li>A group closes at 16 items (<code>ask_batch</code>) or when the next item would overflow the budget.</li>
+        <li>The batched prompt wraps items in <code>&lt;item index="n"&gt;</code> tags and demands a JSON array of exactly n elements. A malformed reply gets one repair call; if that fails too, the group falls back to one call per item and a <code>note</code> event records it.</li>
+      </ul>
+      <p>The README's measured example: 300 support tickets (350 KB) classified into 4 categories took 22 calls and 23 seconds with 296 of 300 correct. With <code>ask_batch=1</code> the same job took over three minutes and ran into the 300-call limit, for roughly the same accuracy.</p>
+    </div>
+    <figure>
+      <div class="fig-box calc" id="calc">
+        <div style="display:grid; gap:12px; align-content:start">
+          <div class="presets" role="group" aria-label="Examples">
+            <button class="btn" type="button" data-n="300" data-s="1167">300 tickets</button>
+            <button class="btn" type="button" data-n="40" data-s="300">40 short records</button>
+            <button class="btn" type="button" data-n="2" data-s="21792">demo: 2 chunks</button>
+            <button class="btn" type="button" data-n="1000" data-s="120">1,000 log lines</button>
+          </div>
+          <label for="in-n">Items <output id="o-n"></output><input id="in-n" type="range" min="1" max="1000" value="300"></label>
+          <label for="in-s">Average item size, chars <output id="o-s"></output><input id="in-s" type="range" min="20" max="40000" step="10" value="1167"></label>
+          <label for="in-b">ask_batch (items per call) <output id="o-b"></output><input id="in-b" type="range" min="1" max="64" value="16"></label>
+          <label for="in-c">ask_batch_chars <output id="o-c"></output><input id="in-c" type="range" min="2000" max="100000" step="1000" value="24000"></label>
+        </div>
+        <div style="display:grid; gap:12px; align-content:start; min-width:0">
+          <div class="kpis"><div class="kpi"><b id="k-calls">0</b><span>sub-model calls</span></div><div class="kpi"><b id="k-naive">0</b><span>without batching</span></div><div class="kpi"><b id="k-solo">0</b><span>items with their own call</span></div></div>
+          <div class="cells" id="cells" aria-label="Each box is one sub-model call; each square is one item"></div>
+          <div class="legend"><span><i class="dot d-host"></i>shared call</span><span><i class="dot d-model"></i>item big enough to get its own call</span></div>
+        </div>
+      </div>
+      <figcaption>This runs the same grouping rule as <code>Agent._batches()</code> (engine/agent.py:279) with uniform item sizes and the default 400,000-char <code>ask_limit</code>. It counts calls only; repairs and fallbacks would add more.</figcaption>
+    </figure>
+  </div>
+
+  <div class="tbl" style="margin-top:20px"><table>
+    <thead><tr><th></th><th><code>ask</code> / <code>ask_map</code></th><th><code>delegate</code> / <code>delegate_map</code></th></tr></thead>
+    <tbody>
+      <tr><td>What it is</td><td>One request to the sub-model</td><td>A new Agent with its own REPL and turn loop</td></tr>
+      <tr><td>What it sees</td><td>Only the prompt and data passed</td><td>Only its task and <code>data</code>, which becomes its <code>context</code></td></tr>
+      <tr><td>Can run code</td><td>No</td><td>Yes, and can call <code>ask</code>, tools and (if depth allows) <code>delegate</code></td></tr>
+      <tr><td>System prompt</td><td><code>ASK_SYSTEM</code>: "You are a component inside a larger program… reply exactly: NOT FOUND"</td><td>The same <code>SYSTEM</code> as the root</td></tr>
+      <tr><td>Size limit</td><td><code>ask_limit</code> (400,000 chars by default); larger raises <code>ValueError</code> telling the model to chunk</td><td>None, but the pass-through guard refuses handing down 80% or more of a parent context of 20,000+ chars</td></tr>
+      <tr><td>Cost</td><td>1 call (batched) per group</td><td>Several calls: one per turn plus its own sub-calls</td></tr>
+    </tbody></table></div>
+</section>
+
+<!-- ============================================================ RECURSION -->
+<section id="recursion">
+  <div class="sec-head"><div class="eyebrow">Recursion</div><h2>Sub-agents and depth</h2>
+  <p class="lede">A sub-agent is the same <code>Agent</code> class one level down. It shares the run's ledger and concurrency pools, gets a fresh REPL, and cannot see its parent's variables.</p></div>
+
+  <div class="grid2">
+    <figure>
+      <div class="fig-box" role="img" aria-label="Agent tree: root 0 starts three sub-agents with delegate_map; sub-agent 0.2 starts 0.2.1 at depth 2; 0.2.1 trying to delegate is refused because depth 2 is the maximum.">
+        <svg viewBox="0 0 460 330" id="tree">
+          <g id="tr-edges">
+            <path class="edge e-child" d="M230 64 C230 90 80 96 80 120" data-f="1"/>
+            <path class="edge e-child" d="M230 64 V120" data-f="1"/>
+            <path class="edge e-child" d="M230 64 C230 90 380 96 380 120" data-f="1"/>
+            <path class="edge e-child" d="M230 164 V214" data-f="3"/>
+            <path class="edge e-budget" d="M230 258 V290" stroke-dasharray="4 4" data-f="4"/>
+          </g>
+          <g class="nbox nb-host" data-f="0"><rect x="170" y="20" width="120" height="44" rx="8"/><text class="t-title" x="184" y="40">Agent 0</text><text class="t-sub" x="184" y="56">depth 0 · model</text></g>
+          <g class="nbox nb-child" data-f="1"><rect x="20" y="120" width="120" height="44" rx="8"/><text class="t-title" x="34" y="140">Agent 0.1</text><text class="t-sub" x="34" y="156">depth 1 · waiting</text></g>
+          <g class="nbox nb-child" data-f="1"><rect x="170" y="120" width="120" height="44" rx="8"/><text class="t-title" x="184" y="140">Agent 0.2</text><text class="t-sub" x="184" y="156">depth 1</text></g>
+          <g class="nbox nb-child" data-f="1"><rect x="320" y="120" width="120" height="44" rx="8"/><text class="t-title" x="334" y="140">Agent 0.3</text><text class="t-sub" x="334" y="156">depth 1</text></g>
+          <g class="nbox nb-child" data-f="3"><rect x="160" y="214" width="140" height="44" rx="8"/><text class="t-title" x="174" y="234">Agent 0.2.1</text><text class="t-sub" x="174" y="250">depth 2 = max_depth</text></g>
+          <g data-f="4"><text class="t-lab" x="120" y="308" style="fill:var(--budget)">delegate() → DelegationRefused:</text><text class="t-lab" x="120" y="322" style="fill:var(--budget)">"sub-agents are not available at this level"</text></g>
+          <g data-f="2"><text class="t-lab" x="300" y="50">slots (max_parallel = 2):</text><text class="t-lab" x="300" y="64" id="slot-line">root holds 1 of 2</text></g>
+        </svg>
+      </div>
+      <div class="frames" style="margin-top:8px"><button class="btn" id="tree-prev" type="button">Back</button><button class="btn" id="tree-next" type="button">Next</button><span class="path" id="tree-cap"></span></div>
+      <figcaption>Step through a <code>delegate_map</code> over three items with <code>max_parallel = 2</code> and the default <code>max_depth = 2</code>.</figcaption>
+    </figure>
+    <div class="prose">
+      <p><b>Depth.</b> The root is level 0. <code>max_depth</code> (default 2) is how many levels may exist below it. At the deepest level <code>delegate</code> raises <code>DelegationRefused</code>, and the agent's opening message already says so in its Limits section. <code>ask</code> and <code>ask_map</code> still work there.</p>
+      <p><b>Two concurrency pools.</b> <code>request_slots</code> caps requests in flight; <code>agent_slots</code> caps live sub-agents. When an agent starts children it gives its own agent slot back while it waits, and takes it back afterwards (<code>Agent._spawn</code>). Without that handover, a tree deeper than the pool size would deadlock: every slot would be held by a parent waiting on a child that can never start.</p>
+      <p><b>The pass-through guard.</b> If a parent holds at least 20,000 characters and calls <code>delegate</code> with data that is 80% or more of that, the call is refused with "this only moves the problem down a level". The model must narrow the data first or pass <code>whole=True</code>. It applies to <code>delegate</code>, not <code>delegate_map</code>.</p>
+      <p><b>Tools in children.</b> Sub-agents inherit the parent's tools unless <code>tools=[...]</code> names a subset. A function the model wrote itself can be passed too: its source is copied into the child's REPL as a helper, so it must be self-contained.</p>
+      <p><b>Failure travels up.</b> A child that runs out of turns or budget raises inside the parent's cell as <code>SubcallError</code>. In <code>delegate_map</code>, a failed child becomes a <code>Failed(...)</code> entry; only if every child fails does the call raise.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ BUDGET -->
+<section id="budget">
+  <div class="sec-head"><div class="eyebrow">Cost control</div><h2>Budgets and partial answers</h2>
+  <p class="lede">Limits apply to the whole run, all agents together. A call is counted when it is reserved, before the request goes out, so parallel agents cannot all slip under the ceiling at once.</p></div>
+
+  <div class="grid2">
+    <figure>
+      <div class="fig-box" role="img" aria-label="State diagram: the root agent runs turns; when the budget is spent it gets one grace call and a final turn, ending partial; when turns run out it gets one last turn, ending partial or failed.">
+      <svg viewBox="0 0 470 380">
+        <defs><marker id="ah4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g class="nbox nb-host"><rect x="160" y="16" width="150" height="48" rx="8"/><text class="t-title" x="174" y="38">Running</text><text class="t-sub" x="174" y="54">turn ≤ max_steps</text></g>
+        <g class="nbox nb-budget"><rect x="10" y="130" width="190" height="62" rx="8"/><text class="t-title" x="24" y="152">Budget spent</text><text class="t-sub" x="24" y="170">BudgetExceeded on a root turn</text><text class="t-sub" x="24" y="184">allow_grace(1) + BUDGET_SPENT</text></g>
+        <g class="nbox nb-model"><rect x="270" y="130" width="190" height="62" rx="8"/><text class="t-title" x="284" y="152">Out of turns</text><text class="t-sub" x="284" y="170">turn = max_steps + 1</text><text class="t-sub" x="284" y="184">message += LAST_CALL</text></g>
+        <g class="nbox nb-host"><rect x="160" y="250" width="150" height="48" rx="8"/><text class="t-title" x="174" y="272">ok</text><text class="t-sub" x="174" y="288">submitted normally</text></g>
+        <g class="nbox nb-model"><rect x="10" y="316" width="190" height="52" rx="8"/><text class="t-title" x="24" y="338">partial</text><text class="t-sub" x="24" y="356">Result.note says why</text></g>
+        <g class="nbox nb-budget"><rect x="270" y="316" width="190" height="52" rx="8"/><text class="t-title" x="284" y="338">failed</text><text class="t-sub" x="284" y="356">StepsExhausted, timeout, error</text></g>
+        <path class="edge" marker-end="url(#ah4)" d="M190 64 C150 90 110 100 105 128"/><text class="t-lab" x="70" y="96">limit hit</text>
+        <path class="edge" marker-end="url(#ah4)" d="M280 64 C320 90 360 100 365 128"/><text class="t-lab" x="350" y="96">turns used</text>
+        <path class="edge" marker-end="url(#ah4)" d="M235 64 V248"/><text class="t-lab" x="242" y="160">submit()</text>
+        <path class="edge" marker-end="url(#ah4)" d="M105 192 V314"/><text class="t-lab" x="112" y="260">final turn</text>
+        <path class="edge" marker-end="url(#ah4)" d="M330 192 C300 250 200 280 190 314"/><text class="t-lab" x="250" y="236">submit / prose</text>
+        <path class="edge" marker-end="url(#ah4)" d="M380 192 V314"/><text class="t-lab" x="388" y="260">no submit</text>
+      </svg>
+      </div>
+      <figcaption>Only the root gets a graceful wrap-up on a spent budget. A sub-agent that hits the limit fails upward so its parent can decide. A prose reply on the final turn is accepted unless a schema was given.</figcaption>
+    </figure>
+    <div class="stack">
+      <div class="tbl"><table>
+        <thead><tr><th>Limit</th><th class="num">Default</th><th>Counts</th></tr></thead>
+        <tbody>
+          <tr><td><code>max_calls</code></td><td class="num">300</td><td>Every agent turn, every <code>ask</code>, every batch call, every repair retry</td></tr>
+          <tr><td><code>max_usd</code></td><td class="num">5.00</td><td>Cost the backend reports or the price table estimates</td></tr>
+          <tr><td><code>max_tokens</code></td><td class="num">none</td><td>Input plus output tokens</td></tr>
+          <tr><td><code>timeout</code></td><td class="num">none</td><td>Wall clock, checked between calls; hard stop at <code>timeout × 1.5 + 30</code></td></tr>
+          <tr><td><code>max_steps</code></td><td class="num">20</td><td>Turns per agent</td></tr>
+          <tr><td><code>max_depth</code></td><td class="num">2</td><td>Levels of sub-agents below the root</td></tr>
+          <tr><td><code>cell_timeout</code></td><td class="num">120 s</td><td>Compute time of one cell, excluding time spent waiting on sub-calls</td></tr>
+        </tbody></table></div>
+      <div class="callout warn"><b>Read the cost number carefully</b><p>Claude Code reports a figure even under a subscription. It is the API-equivalent price, not a charge to you, so <code>max_usd</code> caps a hypothetical bill there. Backends that report only tokens get an estimate from <code>models/pricing.py</code> or your <code>[pricing]</code> table; with neither, <code>max_usd</code> cannot apply, and the engine emits a <code>note</code> saying so.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ RESILIENCE -->
+<section id="resilience">
+  <div class="sec-head"><div class="eyebrow">Failure handling</div><h2>When things break</h2>
+  <p class="lede">Much of the code is about keeping a run alive when a model or a process misbehaves. Each of these was written for a failure the author hit in testing.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th>What goes wrong</th><th>What the engine does</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>Reply has no code block</td><td>Tells the model nothing ran and spends the turn. After two prose replies in a row (or on the final turn) the prose is accepted as the answer, unless a schema was given.</td><td><span class="path">agent.py:_loop · prompts.no_code</span></td></tr>
+      <tr><td>Code wrapped in tool-call markup (<code>&lt;invoke…&gt;</code>, <code>&lt;/parameter&gt;</code>) or an unclosed fence</td><td>Strips markup-only lines, ends an unclosed block at the next fence, drops a short prose paragraph, or salvages code above a lone fence. Used only if the result compiles; recorded as a <code>note</code>.</td><td><span class="path">text.py:_repair, _salvage</span></td></tr>
+      <tr><td>Cell raises</td><td>Traceback (cell frames only, last 8) goes back to the model. Variables are intact.</td><td><span class="path">worker.py:_format_error</span></td></tr>
+      <tr><td>Cell runs forever</td><td>After <code>cell_timeout</code> of compute: SIGINT, so the cell raises and variables survive. 5 s later, or immediately under a launcher where SIGINT cannot be delivered: kill and restart; <code>context</code> is reloaded, other variables are lost, and the model is told.</td><td><span class="path">host.py:run, _crashed</span></td></tr>
+      <tr><td>Worker crashes (segfault, OOM, <code>os._exit</code>)</td><td>Same restart path. The message includes the exit code or signal name and the end of the worker's stderr.</td><td><span class="path">host.py:_death_note</span></td></tr>
+      <tr><td><code>submit</code> value fails the schema</td><td>Errors and the schema go back; "your variables are intact". On the final turn this becomes <code>StepsExhausted</code>.</td><td><span class="path">prompts.schema_feedback</span></td></tr>
+      <tr><td>Sub-model returns bad JSON</td><td>One repair call with the errors and the clipped reply. Batches repair once, then fall back to single calls.</td><td><span class="path">run.py:ask, ask_batch</span></td></tr>
+      <tr><td>Model output runs away (repeating loop)</td><td>Checked every 1,000 streamed chars: over 80,000 chars, or a tail of one short unit repeated for 600+ chars. The CLI is killed, the reply kept, and the next turn rebuilds the session from the transcript.</td><td><span class="path">text.py:looks_runaway · claude_code.py</span></td></tr>
+      <tr><td>Upstream stall (keep-alive pings only)</td><td>After 90 s without real progress the Claude Code session is abandoned and replayed into a fresh process, up to 2 retries, instead of waiting out the CLI's own much longer retry.</td><td><span class="path">claude_code.py:_read_turn</span></td></tr>
+      <tr><td>opencode quietly retrying a quota error for hours</td><td>Parses opencode's log for <code>level=ERROR … session.id</code> lines and fails at once on hopeless errors (quota, auth, billing).</td><td><span class="path">opencode.py:log_error</span></td></tr>
+      <tr><td>Conversation grows too long (HTTP backends)</td><td>Past 300,000 chars, older REPL outputs are trimmed to 400 head + 200 tail characters. The first message and the last 6 messages are never touched. Trimming goes in strides so the prompt cache breaks rarely.</td><td><span class="path">models/base.py:StatelessChat</span></td></tr>
+      <tr><td>A sink (your <code>on_event</code>) throws</td><td>Reported once on stderr; the run continues.</td><td><span class="path">events.py:Events.emit</span></td></tr>
+      <tr><td>Ctrl-C or SIGTERM</td><td>The run task is cancelled, tracked child processes are killed, and <code>rlm</code> exits at once.</td><td><span class="path">procs.py</span></td></tr>
+    </tbody></table></div>
+</section>
+
+<!-- ============================================================ BACKENDS -->
+<section id="backends">
+  <div class="sec-head"><div class="eyebrow">Models</div><h2>Backends and caching</h2>
+  <p class="lede">Models are named <code>provider:model</code>. The engine needs only <code>chat(system).send(text)</code> and an optional <code>complete()</code>. What differs is where the conversation lives and how the prompt cache gets hit.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Spec</th><th>How it is driven</th><th>Conversation lives in</th><th>Caching</th><th class="num">Default parallel</th></tr></thead>
+    <tbody>
+      <tr><td><code>claude-code[:model]</code></td><td>One long-lived <code>claude -p</code> per agent, stream-json both ways, <code>--tools ""</code>, own system prompt file, no MCP, no slash commands, no session persistence</td><td>the CLI process; each turn sends only the new message</td><td>the CLI's own prompt cache, hit on every turn after the first</td><td class="num">4</td></tr>
+      <tr><td><code>opencode[:provider/model]</code></td><td><code>opencode serve</code> shared by the run (or <code>opencode run</code> per turn); a generated <code>opencode.json</code> denies every tool and defines a bare agent</td><td>the opencode server session</td><td>whatever the underlying provider does</td><td class="num">4</td></tr>
+      <tr><td><code>anthropic:&lt;model&gt;</code></td><td>Official SDK, streaming, optional server-side refusal fallback</td><td>in-process (<code>StatelessChat</code>)</td><td>two <code>cache_control</code> breakpoints: the shared system prompt and the newest message</td><td class="num">8</td></tr>
+      <tr><td><code>openai:</code>, <code>openrouter:</code>, <code>gemini:</code>, <code>groq:</code>, <code>deepseek:</code>, <code>ollama:</code></td><td>Plain HTTP with <code>urllib</code>, no extra dependency; honours <code>Retry-After</code>; <code>OLLAMA_HOST</code></td><td>in-process</td><td>provider-side automatic caching, if any</td><td class="num">8</td></tr>
+      <tr><td><code>&lt;name&gt;:</code> with <code>kind = "command"</code></td><td>Any program: the transcript goes in on stdin, the reply is read from stdout or a JSON path</td><td>in-process</td><td>none</td><td class="num">4</td></tr>
+      <tr><td><code>Scripted</code></td><td>Canned replies or a function; used by tests and <code>rlm demo</code></td><td>in-process</td><td>n/a</td><td class="num">16</td></tr>
+    </tbody></table></div>
+  <div class="grid2" style="margin-top:18px">
+    <div class="callout"><b>Why one fixed system prompt matters</b><p>Every agent in a tree, root and sub-agents, gets the identical 4,070-character <code>SYSTEM</code> string. Everything that varies (task, data summary, tools, schema, limits, depth) goes in the first user message. On a provider that caches by prefix, the system prompt is paid for once and read from cache by every other agent in the run.</p></div>
+    <div class="callout"><b>Model choice is the main cost lever</b><p>The root decides what to do and writes code; sub-models only read. <code>model="claude-code:sonnet", sub_model="claude-code:haiku"</code> is the README's first recommended optimisation. Pricing for estimates lives in <code>models/pricing.py</code> and can be overridden per model under <code>[pricing]</code>.</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ SESSIONS -->
+<section id="sessions">
+  <div class="sec-head"><div class="eyebrow">State</div><h2>Sessions</h2>
+  <p class="lede">A <code>Session</code> keeps the root's REPL alive across questions, so the second question can reuse what the first one parsed.</p></div>
+  <div class="grid2">
+    <figure><pre class="code"><span class="k">with</span> rlm.Session(path=<span class="s">"analysis.json"</span>) <span class="k">as</span> session:
+    session.run(<span class="s">"Parse this export into `rows`."</span>, context=export)
+    session.run(<span class="s">"Which region had the highest revenue?"</span>)   <span class="d"># reuses rows</span>
+
+<span class="d"># What the second task's opening message gains:</span>
+## Earlier in this session
+This REPL has already been used in this session. Its variables
+are still defined; reuse them.
+
+Earlier tasks and their answers:
+  1. Parse this export into `rows`.
+     -&gt; parsed 5,000 rows ...
+
+Variables and functions defined so far:
+  rows (list): [{'region': 'EU', ...}, ...]</pre></figure>
+    <div class="prose">
+      <p>Each task starts a <em>fresh</em> model conversation. The only memory is the live namespace plus a short record: the last 8 tasks with one-line answers and an inventory of up to 60 variables. That keeps the prompt small however long the session runs.</p>
+      <p>With <code>path=</code>, after every task the worker pickles each user variable (up to 50 MB each) and the source of every function or class the model defined, and the session writes them atomically to a JSON file. Opening the same path restores them. Open files, locks and generators are skipped and listed.</p>
+      <p>A session file holds pickles made by the worker. Restoring one unpickles it inside a worker, so treat a session file as code and never restore one from someone you do not trust.</p>
+      <p>The CLI equivalent is <code>rlm "…" --session NAME</code>, stored under <code>./.rlm/sessions</code> or <code>RLM_SESSION_DIR</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ OBSERVE -->
+<section id="observe">
+  <div class="sec-head"><div class="eyebrow">Observability</div><h2>Traces and events</h2>
+  <p class="lede">One event stream feeds the console, a JSONL trace file and your callback. Nothing is computed outside the REPL, so the trace shows every step that led to an answer.</p></div>
+  <div class="grid2">
+    <div class="tbl"><table>
+      <thead><tr><th>Event</th><th>Carries</th></tr></thead>
+      <tbody>
+        <tr><td><code>run.start</code></td><td>task, model, sub_model, context summary, limits, tool names</td></tr>
+        <tr><td><code>agent.start</code></td><td>agent id, parent, task, context size</td></tr>
+        <tr><td><code>model.reply</code></td><td>step, full reply text, seconds, usage, served model</td></tr>
+        <tr><td><code>cell.start</code> / <code>cell</code></td><td>code, clipped output, error flag, seconds, submitted</td></tr>
+        <tr><td><code>call.start</code> / <code>call.end</code></td><td>op (ask, ask_map, delegate, tool), item count, chars, ok, failed count</td></tr>
+        <tr><td><code>note</code></td><td>repairs, batch fallbacks, runaway output, cost not enforceable</td></tr>
+        <tr><td><code>agent.end</code> / <code>run.end</code></td><td>status, answer, error, usage by model, trace path</td></tr>
+      </tbody></table></div>
+    <div class="prose">
+      <p>Traces go to <code>~/.local/state/rlm-ig/traces/&lt;timestamp&gt;-&lt;task-slug&gt;.jsonl</code>. <code>rlm trace</code> replays the last one as an agent tree, <code>--full</code> shows every code block and output, and <code>--html OUT</code> writes a self-contained page.</p>
+      <p><code>on_event=</code> receives the same events live, which is the hook for metrics, progress bars or shipping traces to your own store.</p>
+      <div class="callout warn"><b>Traces contain your data</b><p>Cell outputs and model replies are written verbatim (clipped to the output limit). If the data is sensitive, set <code>trace = false</code> or put <code>trace_dir</code> somewhere with the same retention rules as the data.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ SECURITY -->
+<section id="security">
+  <div class="sec-head"><div class="eyebrow">Threat model</div><h2>Security model</h2>
+  <p class="lede">By default the worker is an ordinary subprocess running as you. It is not a security boundary, and the docs say so plainly.</p></div>
+  <div class="grid3">
+    <div class="card"><h4><span class="dot d-budget"></span>Default: subprocess</h4><ul><li>Can read your files, use the network, start programs</li><li>Environment scrubbed to an allowlist (PATH, HOME, locale, proxies, CA bundles…). API keys are not passed</li><li>Throwaway working directory, not a jail</li><li>Optional <code>memory_mb</code> sets <code>RLIMIT_AS</code></li></ul></div>
+    <div class="card"><h4><span class="dot d-host"></span><code>--sandbox docker</code></h4><ul><li><code>--network none</code>, read-only root, tmpfs <code>/tmp</code></li><li><code>--cap-drop ALL</code>, <code>no-new-privileges</code></li><li><code>--memory 1g --pids-limit 256</code>, user 65534</li><li>Image: Python 3.12 + numpy, pandas, dateutil, regex. Covered by tests against a real Docker daemon in CI</li></ul></div>
+    <div class="card"><h4><span class="dot d-model"></span>What still runs on the host</h4><ul><li><code>ask</code>, <code>delegate</code>, and your tools cross the container boundary by design</li><li>A tool that runs SQL or shell on the model's say-so is as dangerous as the model's code</li><li>MCP servers have your full environment</li><li>Text in the data can steer the model (prompt injection)</li></ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ COMPARE -->
+<section id="compare">
+  <div class="sec-head"><div class="eyebrow">Positioning</div><h2>Versus normal LLM and agent use</h2>
+  <p class="lede">The useful comparison is with what you would otherwise build: a single call with everything pasted in, a tool-using coding agent, or a retrieval pipeline.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th style="min-width:130px"></th><th>Single LLM call</th><th>Tool agent (Claude Code with Read/Grep)</th><th>RAG pipeline</th><th>rlm-ig</th></tr></thead>
+    <tbody>
+      <tr><td>Where the data is</td><td>In the prompt</td><td>On disk; tool outputs pile up in the context</td><td>In a vector or keyword index</td><td>In a Python variable in RAM</td></tr>
+      <tr><td>What the model reads</td><td>Everything, once</td><td>Whatever its tools return, kept in history</td><td>Top-k retrieved chunks</td><td>Only what its code prints, clipped to 8,000 chars per turn</td></tr>
+      <tr><td>Exact aggregation (count, top-N, join)</td><td><span class="pill p-lose">guesses</span></td><td><span class="pill p-mid">via shell, ad hoc</span></td><td><span class="pill p-lose">sees only k chunks</span></td><td><span class="pill p-win">exact, in code</span></td></tr>
+      <tr><td>Data larger than the window</td><td><span class="pill p-lose">no</span></td><td><span class="pill p-mid">until the context fills</span></td><td><span class="pill p-win">yes</span></td><td><span class="pill p-win">yes, up to RAM</span></td></tr>
+      <tr><td>Reading many items with judgement</td><td>Inside one attention pass</td><td>One by one, serially</td><td>Only retrieved ones</td><td><code>ask_map</code> in parallel batches, structured output</td></tr>
+      <tr><td>Latency per question</td><td><span class="pill p-win">one call</span></td><td><span class="pill p-mid">many turns</span></td><td><span class="pill p-win">retrieval + one call</span></td><td><span class="pill p-mid">5 to 25 s in README tests</span></td></tr>
+      <tr><td>Setup</td><td>None</td><td>None</td><td>Chunking, embeddings, index, re-indexing</td><td><code>pip install</code>, no index</td></tr>
+      <tr><td>Repeated questions on one corpus</td><td>Pays full input each time (minus cache)</td><td>Re-explores</td><td><span class="pill p-win">index amortised</span></td><td>Re-explores; sessions keep parsed variables</td></tr>
+      <tr><td>Typical failure</td><td>Confident wrong numbers, lost-in-the-middle</td><td>Context exhaustion, wandering</td><td>Retrieval misses the passage</td><td>Code reads the wrong slice, a bad regex, a skipped edge case</td></tr>
+      <tr><td>Audit trail</td><td>Prompt and reply</td><td>Tool log</td><td>Retrieved chunks</td><td>Every code block, output and sub-call in the trace</td></tr>
+    </tbody></table></div>
+  <p class="lede" style="margin-top:14px">The closest relative is the tool agent. The difference is that rlm-ig keeps data and intermediate results in variables instead of the conversation, lets code call models in loops and in parallel, and puts hard run-wide limits around all of it.</p>
+</section>
+
+<!-- ============================================================ SAVINGS -->
+<section id="savings">
+  <div class="sec-head"><div class="eyebrow">The honest question</div><h2>Does it save anything, or is it hype?</h2>
+  <p class="lede">It saves a lot on one class of problem and costs more on others. The approach is sound; the marketing around "infinite context" is not.</p></div>
+
+  <div class="verdict">
+    <div class="card v-good"><h4>Clear win</h4><ul>
+      <li>Data far larger than the window: logs, exports, document sets in the MB range</li>
+      <li>Questions code can answer exactly: counts, rankings, joins, "which X happened twice"</li>
+      <li>Many items that each need a short judgement: <code>ask_map</code> batches 300 tickets into about 19 calls</li>
+      <li>You need to show how an answer was produced</li></ul></div>
+    <div class="card v-mid"><h4>Depends</h4><ul>
+      <li>Medium documents (50k to 150k tokens) that fit in a modern window: a plain call is faster; rlm-ig is more exact on numbers</li>
+      <li>Summaries of a whole document: <code>ask_map</code> over chunks reads everything anyway, plus orchestration overhead</li>
+      <li>Root model quality: a weak coder wastes turns, and every turn is a round trip</li></ul></div>
+    <div class="card v-bad"><h4>Loses</h4><ul>
+      <li>Small inputs: 2+ calls and a ~1k-token system prompt where one call would do</li>
+      <li>Low-latency paths (chat replies, per-request triage): seconds to minutes per answer</li>
+      <li>Questions needing subtle cross-document reading the code cannot narrow</li>
+      <li>Terabyte corpora: the context lives in one process's memory</li></ul></div>
+  </div>
+
+  <div class="grid2" style="margin-top:20px">
+    <div class="prose">
+      <h3>Where the tokens go</h3>
+      <p>Every agent pays a system prompt of about 1,000 tokens (4,070 chars ÷ 4), cached after the first agent on caching backends. Each turn re-sends the conversation; Claude Code and the Anthropic backend serve most of it from cache, which is why the OpenSSH run shows 6.8k of 11k input tokens cached. Cell output is capped at 8,000 chars per turn, so a model that prints carelessly cannot blow up the context. Sub-calls pay for exactly the data the code selected.</p>
+      <p>So the cost of a run scales with the number of turns and the amount of data the code chooses to read, not with the size of <code>context</code>. That is the real saving, and it is why a 3.7 MB file cost $0.0008 in the README's measurements.</p>
+      <h3>Where the time goes</h3>
+      <p>A turn through Claude Code takes 1 to 3 seconds with Haiku. The REPL is not the bottleneck: scanning 100 MB of text in a cell takes under a second. A 5-turn run is therefore 5 to 15 seconds before sub-calls. A single-call baseline would be one round trip.</p>
+    </div>
+    <div class="prose">
+      <h3>What the research says</h3>
+      <p>The paper rlm-ig implements (Zhang, Kraska and Khattab, arXiv:2512.24601) reports that RLMs handle inputs about two orders of magnitude beyond the model's window and beat base models and common long-context scaffolds on four long-context benchmarks, at comparable or lower median cost per query. Commentary on the paper reports that the cost distribution has a long tail: most queries are cheap, a few are several times more expensive.</p>
+      <p>A later reproduction (arXiv:2603.02615, "Think, But Don't Overthink") found RLMs slow and expensive in practice, with per-query latencies of 89 and 344 seconds in its settings, and found that going to depth 2 made models overthink and spawn excessive sub-calls. Another reading of the paper notes that the REPL-only ablation, with no sub-calls, already captures much of the gain on some tasks, which suggests the REPL matters more than the recursion for those.</p>
+      <p>My read: the REPL plus code-for-exact-work idea is the durable part. Deep recursion is the speculative part. rlm-ig's defaults lean on the durable part (batching, cheap sub-models, a pass-through guard) but still allow depth 2 by default, which the reproduction suggests is risky.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ RAG / TRIAGE / SMALL -->
+<section id="rag">
+  <div class="sec-head"><div class="eyebrow">Fit</div><h2>RAG, triage and small models</h2></div>
+  <div class="grid3">
+    <div class="card"><h4>Can it replace RAG?</h4><p><b>No, not in general.</b> RAG answers "find the few relevant passages among millions" in milliseconds from a prebuilt index, and amortises indexing over many queries. rlm-ig has no index, explores per question, and holds the data in one process's memory.</p><p>They fit together. Give the model your retriever as a tool (the docstring example in <code>tools/__init__.py</code> is literally <code>kb_search(query, k)</code>) and let rlm-ig do the part RAG is bad at: counting, comparing and checking across the retrieved set. Where the whole relevant dataset fits in RAM (one customer's tickets, one incident's logs, one contract folder) and questions are aggregations, rlm-ig can replace a RAG pipeline you would otherwise have to build.</p></div>
+    <div class="card"><h4>Can it do triage?</h4><p><b>Batch triage, yes. Online triage, no.</b> <code>ask_map</code> with a schema is a ready-made bulk classifier: the README's 300-ticket run got 296 right in 23 s for $0.028. That suits backlog sorting, weekly theme reports, and labelling data to train a cheaper classifier.</p><p>Classifying each ticket as it arrives is a single cheap call with a fixed prompt. Wrapping it in an agent loop adds turns and seconds for nothing. Use rlm-ig to find the categories and rules; use a plain call or a small model in the hot path.</p></div>
+    <div class="card"><h4>Small or local models</h4><p>I read "jev model" in your question as a small, cheap or local model; tell me if you meant something else. Ollama and any OpenAI-compatible server work out of the box (<code>ollama:&lt;model&gt;</code>).</p><p>The root model has to write correct Python every turn, and that is where small models struggle: the README notes Haiku sometimes replies without a code block or with a mangled one, which is why the repair code exists. The sensible split is a capable root and a small <code>sub_model</code> for <code>ask_map</code> reading work. The paper also reports a post-trained 8B model (based on Qwen3-8B) that was trained to work recursively, so small models can do this when trained for it.</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ ENTERPRISE -->
+<section id="enterprise">
+  <div class="sec-head"><div class="eyebrow">Production</div><h2>Enterprise and production use</h2>
+  <p class="lede">Good fits share three traits: a bounded dataset that fits in memory, a question that code can mostly answer, and a tolerance for answers taking seconds to minutes.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Use case</th><th>How the primitives map</th><th>Evidence in the repo</th></tr></thead>
+    <tbody>
+      <tr><td>Incident forensics over logs</td><td><code>grep</code> and <code>Counter</code> for error clusters and timelines, <code>ask_map</code> to explain unusual lines, schema for a postmortem record</td><td>Measured: planted line in 488 KB and 3.7 MB logs, exact, 2 to 4 calls</td></tr>
+      <tr><td>Security review (SSH, web access logs)</td><td>Regex extraction, ranking, <code>ask</code> to label attack types with evidence lines</td><td>Real run on Loghub OpenSSH, counts verified against grep</td></tr>
+      <tr><td>Support backlog triage and theme mining</td><td><code>ask_map</code> with a category schema, code to aggregate</td><td>Measured: 296 of 300 correct, 22 calls, $0.028</td></tr>
+      <tr><td>Contract and policy comparison</td><td><code>-f contracts/</code> gives a dict of path to text; <code>delegate_map</code> per document; schema for clause tables</td><td>README example task; the 6-document expense run below uses the same pattern</td></tr>
+      <tr><td>Finance and expense audit</td><td>One sub-agent per department document, typed answer per department</td><td>Measured: 6 documents, 519 KB, exact, 16 calls, $0.0065</td></tr>
+      <tr><td>Data QA on exports</td><td>A session parses the CSV once, follow-up questions reuse <code>rows</code></td><td>Measured: three chained questions on 5,000 rows, consistent, 7 calls</td></tr>
+      <tr><td>Call and meeting transcript mining</td><td><code>ask_map</code> per transcript with a schema (objections, commitments), code to roll up</td><td>Fits the design; not measured in the repo</td></tr>
+      <tr><td>Config and codebase audits</td><td>Directory as dict, regex across files, <code>ask</code> on the few files that match</td><td>Fits the design; not measured in the repo</td></tr>
+    </tbody></table></div>
+
+  <div class="grid2" style="margin-top:20px">
+    <div class="card"><h4>Production checklist</h4><ul>
+      <li>Use an API backend for predictable billing and quotas. Claude Code under a subscription reports API-equivalent prices and is built for interactive use; check your plan's terms before running it unattended.</li>
+      <li>Run untrusted data with <code>--sandbox docker</code>, and make every tool read-only and argument-validated.</li>
+      <li>Always pass a <code>schema</code> so prose is never accepted as an answer, and call <code>result.raise_for_status()</code> or check exit codes (0, 2, 1) in pipelines.</li>
+      <li>Set <code>max_usd</code>, <code>max_calls</code> and <code>timeout</code> per job; treat <code>partial</code> as "needs review".</li>
+      <li>Decide trace retention; traces hold your data.</li>
+      <li>Size memory: about 200 MB per live Claude Code process, about 20 MB plus the context per REPL worker.</li>
+      <li>Prefer tasks whose answers code can verify, and log the trace path with every answer.</li></ul></div>
+    <div class="card"><h4>What has not been proven yet</h4><ul>
+      <li>The Anthropic and OpenAI-compatible backends were tested against local servers that speak the wire formats, not against the live services (README, Known limits).</li>
+      <li>The MCP client was tested against conformance fakes, not third-party servers.</li>
+      <li>opencode was not run end to end on a hosted provider.</li>
+      <li>Podman, native Windows and arm64 hardware are untested.</li>
+      <li>All measured numbers come from one sandbox with Claude Haiku as both root and sub-model. Larger models change latency and cost.</li></ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STRESS -->
+<section id="stress">
+  <div class="sec-head"><div class="eyebrow">Critique</div><h2>Weak points in the design</h2>
+  <p class="lede">The codebase is careful and unusually well documented. These are the places I would push on before relying on it in production.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Issue</th><th>Why it matters</th><th>What I would change</th></tr></thead>
+    <tbody>
+      <tr><td>Every <code>ask</code> on Claude Code starts a new CLI process</td><td><code>ClaudeCode</code> does not override <code>Model.complete()</code>, so each sub-call creates a chat, spawns <code>claude -p</code> (about 200 MB), sends one message and closes it. Batching hides this for <code>ask_map</code>, but a loop of single <code>ask</code> calls pays start-up every time.</td><td>A small pool of warm processes for one-shot calls, or route sub-calls to an API backend by default.</td></tr>
+      <tr><td>Default <code>max_depth = 2</code></td><td>The paper ran depth 1 and the reproduction reports depth 2 causes overthinking and runaway sub-calls. The pass-through guard covers only <code>delegate</code>, not <code>delegate_map</code>.</td><td>Default to 1; make depth 2 opt-in.</td></tr>
+      <tr><td>Prose accepted as the answer</td><td>Two prose replies in a row become the final answer when there is no schema. A model asking a clarifying question twice ends the run with that question as the "answer".</td><td>Mark such results <code>partial</code>, or require a schema in library use.</td></tr>
+      <tr><td><code>timeout</code> is checked between calls</td><td>One long cell can overshoot; the hard stop is at <code>timeout × 1.5 + 30</code>.</td><td>Fine for batch jobs; document it as soft for SLAs.</td></tr>
+      <tr><td><code>max_usd</code> is only as good as the cost signal</td><td>Under a subscription it caps a hypothetical bill; on backends without cost or a price entry it does nothing (a note is emitted, not an error).</td><td>Option to fail fast when <code>max_usd</code> is set and cost is unknown.</td></tr>
+      <tr><td>Data handed to sub-agents goes through JSON</td><td><code>delegate</code> data is reduced with <code>jsonable()</code>, so non-JSON objects become their <code>repr</code>, and big slices cross the pipes twice (worker to host to child worker).</td><td>Acceptable; worth a warning when a <code>repr</code> fallback happens.</td></tr>
+      <tr><td>Batching shares attention</td><td>Up to 16 items share one call; one confusing item can make the whole batch fail validation and fall back to 16 single calls.</td><td>Split a failed batch in halves before going to singles.</td></tr>
+      <tr><td>Context lives in one process</td><td>The worker holds the whole context in RAM, and the host keeps it too so it can restart a crashed worker. There is no streaming or on-disk mode.</td><td>A file-backed or memory-mapped context for very large inputs.</td></tr>
+    </tbody></table></div>
+</section>
+
+<!-- ============================================================ ORIGINS -->
+<section id="origins">
+  <div class="sec-head"><div class="eyebrow">Lineage</div><h2>Where the idea comes from</h2>
+  <p class="lede">The repo cites two sources. The method comes from the Recursive Language Models paper by Alex L. Zhang, Tim Kraska and Omar Khattab (MIT CSAIL, arXiv:2512.24601). The example data comes from Loghub (Zhu et al., ISSRE 2023). The README states rlm-ig is an independent implementation, not affiliated with the authors.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Paper and its reference code</th><th>rlm-ig</th></tr></thead>
+    <tbody>
+      <tr><td>Prompt stored as a variable in a Python REPL</td><td><code>context</code> in a separate worker process</td></tr>
+      <tr><td><code>llm_query(...)</code> for recursive sub-calls</td><td><code>ask</code>, <code>ask_map</code>, <code>delegate</code>, <code>delegate_map</code></td></tr>
+      <tr><td><code>FINAL(...)</code> / <code>FINAL_VAR(name)</code> to answer</td><td><code>submit(value)</code>, validated against a schema</td></tr>
+      <tr><td>Max recursion depth of one in experiments</td><td><code>max_depth = 2</code> by default</td></tr>
+      <tr><td>Sub-calls are blocking; the prompt advises batching chunks by hand</td><td>Parallel <code>*_map</code> with automatic batching in the engine</td></tr>
+      <tr><td>Blog lists no prefix caching as a limitation</td><td>One shared system prompt, long-lived Claude Code processes, cache breakpoints on the Anthropic API</td></tr>
+      <tr><td>Reference REPL runs in-process with restricted builtins by default</td><td>Real subprocess, optional Docker isolation</td></tr>
+    </tbody></table></div>
+  <p class="lede" style="margin-top:14px">The official code is <a href="https://github.com/alexzhang13/rlm" rel="noopener">github.com/alexzhang13/rlm</a>, with a smaller <a href="https://github.com/alexzhang13/rlm-minimal" rel="noopener">rlm-minimal</a> and the original <a href="https://alexzhang13.github.io/blog/2025/rlm/" rel="noopener">blog post</a>. rlm-ig does not mention them, but its design choices line up closely with the limitations they list.</p>
+</section>
+
+<footer>Built from the source on <code>main</code> at commit 0868b50 (version 0.2.0). Numbers marked as measured come from the repository's README and GUIDE; the replay is a real <code>rlm demo</code> run; the OpenSSH counts were re-checked against the public Loghub file. Research claims come from the paper's abstract and published commentary: <a href="https://arxiv.org/abs/2512.24601">arXiv:2512.24601</a>, <a href="https://alexzhang13.github.io/blog/2025/rlm/">the authors' blog post</a>, <a href="https://arxiv.org/abs/2603.02615">the reproduction study</a>, <a href="https://luna-shi.github.io/blog/readings-rlm-recursive-language-model/">a reading of the ablations</a>, and <a href="https://www.danilchenko.dev/posts/recursive-language-models/">practitioner notes on RLM versus RAG</a>.</footer>
+</main>
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+(function(){
+  "use strict";
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function $(id){ return document.getElementById(id); }
+  function css(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  /* ---------------------------------------------------------- replay data */
+  var COL = {model:"--model", sub:"--model", repl:"--repl", child:"--child", ledger:"--budget"};
+  var STEPS = [
+    {t:"Start: engine, run, worker", calls:0, host:"starting worker", vars:"vars: none yet", child:"not started",
+     x:"Engine resolves the model, Run creates the ledger and the slot pools, and the root Agent starts its REPL worker. The worker receives its own source over stdin, then an init frame with the 2.4 MB context. It replies with a structural summary, not the data.",
+     p:"api.py:114 · engine/run.py:24 · sandbox/host.py:219",
+     hops:[["repl",1,"init: source + context"],["repl",-1,"ready + summary"]],
+     term:[["h","rlm  scripted:demo  · context: str, 2,432,029 chars"]]},
+    {t:"Turn 1: the model looks first", calls:1, host:"waiting on model",
+     x:"The opening message holds the task, the summary and the limits. The model answers with one sentence and one python block: peek() and the first 300 characters. The ledger reserves the call before the request goes out.",
+     p:"engine/prompts.py:118 · engine/run.py:84",
+     hops:[["ledger",1,"reserve 1 call"],["model",1,"task + summary"],["model",-1,"note + ```python"]],
+     term:[["r","root   ▸ turn 1  0.1s  First a look at the size and shape of the data."],["c","root     │ peek()"],["c","root     │ print(context[:300])"]]},
+    {t:"The cell runs in the worker", calls:1, host:"running cell",
+     x:"The host sends an exec frame. The worker runs the code in its persistent namespace and captures stdout. 1,283 characters come back and are sent to the model with a footer: [turn 1 of 20 · 0.0s].",
+     p:"sandbox/host.py:280 · sandbox/worker.py:run_cell",
+     hops:[["repl",1,"exec"],["repl",-1,"done: 1,283 chars"]],
+     term:[["o","root     └ ran 0.00s, 1,283 chars of output"],["o","root     │ context: str, 2,432,029 chars, 40,000 lines"]]},
+    {t:"Turn 2: code does the exact work", calls:2, host:"running cell", vars:"vars: failed, per_service",
+     x:"Counting payment failures per service over 40,000 lines is exact and free in Python. No model call is spent on it. The variables failed and per_service stay defined for later turns.",
+     p:"docs/concepts.md · annotated transcript",
+     hops:[["ledger",1,"reserve"],["model",1,"observation"],["model",-1,"Counter code"],["repl",1,"exec"],["repl",-1,"done: 96 chars"]],
+     term:[["r","root   ▸ turn 2  0.2s  Lines are `timestamp service LEVEL message`. Counting failures…"],["c","root     │ per_service = collections.Counter(line.split()[1] for line in failed)"],["o","root     └ ran 0.01s, 96 chars of output"],["o","root     │ 1125 [('billing', 492), ('invoices', 171), ('ledger', 161), …]"]]},
+    {t:"Turn 3: the model decides to fan out", calls:3, host:"waiting on model",
+     x:"The worst service is billing. The model narrows to its 492 failure lines, splits them with chunk(lines, size=30000) into two pieces, and asks a sub-model to tally reasons in each, with a JSON Schema so the answers come back as dicts.",
+     p:"sandbox/worker.py:chunk · ask_map",
+     hops:[["ledger",1,"reserve"],["model",1,"observation"],["model",-1,"ask_map code"]],
+     term:[["r","root   ▸ turn 3  0.2s  Now the reasons for the worst service. I fan the lines out…"],["c","root     │ parts = chunk(lines, size=30000)"],["c","root     │ tallies = ask_map('Count how often each failure reason occurs…', parts, schema=schema)"]]},
+    {t:"ask_map: two sub-model calls in parallel", calls:5, host:"serving ask_map",
+     x:"The cell blocks on a call frame. Each piece is over 12,000 characters, so batching gives each its own request. The host reserves two calls, sends both concurrently, validates the JSON, and replies to the worker. Code merges the two tallies.",
+     p:"engine/agent.py:_ask_map, _batches · engine/run.py:ask",
+     hops:[["repl",1,"exec"],["repl",-1,"call: ask_map ×2"],["ledger",1,"reserve ×2"],["sub",1,"2 requests"],["sub",-1,"2 JSON dicts"],["repl",1,"reply frame"],["repl",-1,"done: 105 chars"]],
+     term:[["a","root     ⇉ ask_map ×2  43,584 chars"],["a","root     ⇇ ask_map done in 0.2s"],["o","root     └ ran 0.16s, 105 chars of output"],["o","root     │ billing [('gateway_timeout', 334), ('fraud_hold', 59), …]"]]},
+    {t:"Turn 4: a sub-agent double-checks", calls:7, host:"waiting on sub-agent", child:"turn 1 → submit",
+     x:"delegate() starts Agent 0.1 on sub_model with its own REPL, where half the billing lines (21,735 chars) are its context. It counts the reason fields in one turn and submits gateway_timeout, which becomes the return value of delegate in the parent's cell.",
+     p:"engine/agent.py:_delegate, _spawn",
+     hops:[["ledger",1,"reserve"],["model",1,"observation"],["model",-1,"delegate code"],["repl",1,"exec"],["repl",-1,"call: delegate"],["child",1,"spawn Agent 0.1"],["ledger",1,"child turn"],["child",-1,"gateway_timeout"],["repl",1,"reply frame"],["repl",-1,"done: 31 chars"]],
+     term:[["a","root     ⇉ delegate  Double-check: which failure reason is most common…"],["p","  1      ◆ sub-agent Double-check: which failure reason… (21,735 chars)"],["p","  1      ▸ turn 1  0.1s  I only need to count the reason fields in my slice."],["p","  1      ✔ gateway_timeout"],["a","root     ⇇ delegate done in 0.2s"],["o","root     │ gateway_timeout gateway_timeout"]]},
+    {t:"Turn 5: submit builds the answer from variables", calls:8, host:"done", child:"finished",
+     x:"Both checks agree. The model submits a dict built from the variables it already holds, not a retyped copy. The value is validated, the run ends ok, and the trace is written. 8 calls: 5 root turns, 2 ask_map items, 1 sub-agent turn.",
+     p:"engine/agent.py:187 · api.py:164",
+     hops:[["ledger",1,"reserve"],["model",1,"observation"],["model",-1,"submit(...)"],["repl",1,"exec"],["repl",-1,"done: submitted"]],
+     term:[["r","root   ▸ turn 5  0.2s  Both agree, so I can answer."],["g","root     ✔ submitted"],["g","✔ ok  1.3s · 8 calls · 21k in / 453 out · $0.0000"],["o","{\"service\": \"billing\", \"failures\": 492, \"top_reason\": \"gateway_timeout\", \"top_reason_count\": 334}"]]}
+  ];
+
+  var EDGE = {model:"e-model", sub:"e-sub", repl:"e-repl", child:"e-child", ledger:"e-ledger"};
+  var NODE = {model:"n-model", sub:"n-sub", repl:"n-repl", child:"n-child", ledger:"n-ledger"};
+  var svg = $("stage"), pk = $("packets"), term = $("term");
+  var cur = -1, playing = !reduce, token = 0;
+
+  function setStatic(i){
+    var s = STEPS[i];
+    $("sn-title").textContent = s.t;
+    $("sn-text").textContent = s.x;
+    $("sn-path").textContent = s.p;
+    $("term-step").textContent = "step " + i + " of " + (STEPS.length - 1);
+    $("prog").style.width = (100 * i / (STEPS.length - 1)) + "%";
+    $("calls").textContent = s.calls;
+    $("host-state").textContent = s.host;
+    var v = null, c = null;
+    for (var k = 0; k <= i; k++){ if (STEPS[k].vars) v = STEPS[k].vars; if (STEPS[k].child) c = STEPS[k].child; }
+    $("repl-vars").textContent = v || "vars: none yet";
+    $("child-state").textContent = c || "not started";
+    var used = {}; s.hops.forEach(function(h){ used[h[0]] = 1; });
+    Object.keys(NODE).forEach(function(k){ $(NODE[k]).classList.toggle("dim", !used[k] && !(k === "child" && i >= 6)); $(NODE[k]).classList.toggle("lit", !!used[k]); });
+    Object.keys(EDGE).forEach(function(k){ var e = $(EDGE[k]); e.setAttribute("class", "edge" + (used[k] ? " lit e-" + (k === "sub" ? "model" : k === "ledger" ? "budget" : k) : "")); });
+  }
+  function renderTerm(i){
+    term.innerHTML = "";
+    for (var k = 0; k <= i; k++) STEPS[k].term.forEach(function(l){ addLine(l, false); });
+    term.scrollTop = term.scrollHeight;
+  }
+  function addLine(l, anim){
+    var el = document.createElement("span");
+    el.className = "l " + l[0]; if (!anim) el.style.animation = "none";
+    el.textContent = l[1];
+    term.appendChild(el); term.scrollTop = term.scrollHeight;
+  }
+  function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  function animateHop(h, my){
+    var path = $(EDGE[h[0]]), len = path.getTotalLength(), dir = h[1];
+    var color = css(COL[h[0]]) || "#888";
+    var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    var c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("r", "7"); c.setAttribute("class", "packet"); c.setAttribute("fill", color);
+    var t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t.setAttribute("class", "hoplabel"); t.textContent = h[2];
+    g.appendChild(c); g.appendChild(t); pk.appendChild(g);
+    var dur = 750, start = null;
+    return new Promise(function(res){
+      function frame(ts){
+        if (my !== token){ g.remove(); return res(); }
+        if (!start) start = ts;
+        var f = Math.min(1, (ts - start) / dur), e = f < .5 ? 2*f*f : -1 + (4 - 2*f) * f;
+        var p = path.getPointAtLength(dir > 0 ? e * len : (1 - e) * len);
+        c.setAttribute("cx", p.x); c.setAttribute("cy", p.y);
+        var tx = Math.min(Math.max(p.x + 10, 8), 470);
+        t.setAttribute("x", tx); t.setAttribute("y", p.y - 10);
+        if (f < 1) requestAnimationFrame(frame); else { setTimeout(function(){ g.remove(); res(); }, 260); }
+      }
+      requestAnimationFrame(frame);
+    });
+  }
+  async function playStep(i){
+    var my = ++token; cur = i; pk.innerHTML = "";
+    setStatic(i); renderTerm(i - 1);
+    var s = STEPS[i], lines = s.term.slice(), per = Math.max(1, Math.ceil(s.hops.length / Math.max(1, lines.length)));
+    if (reduce){ renderTerm(i); return; }
+    for (var k = 0; k < s.hops.length; k++){
+      if (my !== token) return;
+      await animateHop(s.hops[k], my);
+      if (my !== token) return;
+      if ((k + 1) % per === 0 && lines.length) addLine(lines.shift(), true);
+    }
+    while (lines.length && my === token){ addLine(lines.shift(), true); await wait(120); }
+    if (my !== token) return;
+    await wait(1100);
+    if (playing && my === token){
+      if (i < STEPS.length - 1) playStep(i + 1); else { playing = false; $("play").textContent = "Replay"; }
+    }
+  }
+  function jump(i){ i = Math.max(0, Math.min(STEPS.length - 1, i)); playing = false; $("play").textContent = "Play"; token++; pk.innerHTML = ""; cur = i; setStatic(i); renderTerm(i); }
+  $("play").addEventListener("click", function(){
+    if (playing){ playing = false; this.textContent = "Play"; token++; pk.innerHTML = ""; renderTerm(cur); return; }
+    playing = true; this.textContent = "Pause";
+    playStep(cur >= STEPS.length - 1 ? 0 : Math.max(0, cur + (cur < 0 ? 1 : 1)));
+  });
+  $("next").addEventListener("click", function(){ jump(cur + 1); });
+  $("back").addEventListener("click", function(){ jump(cur - 1); });
+  $("restart").addEventListener("click", function(){ playing = true; $("play").textContent = "Pause"; playStep(0); });
+  // Complete at rest: show the finished run first; auto-play from the start when motion is allowed.
+  jump(STEPS.length - 1);
+  if (!reduce){ playing = true; $("play").textContent = "Pause"; setTimeout(function(){ if (playing) playStep(0); }, 900); }
+  else { $("play").textContent = "Play"; }
+
+  /* ---------------------------------------------------------- batching calculator */
+  var ASK_LIMIT = 400000, PROMPT = 80;
+  function groups(n, s, batch, chars){
+    var budget = Math.min(chars, Math.max(1, ASK_LIMIT - PROMPT - 2000));
+    if (batch <= 1 || n < 2) return Array.from({length:n}, function(){ return {k:1, solo:true}; });
+    var out = [], cur = 0, used = 0, size = s + 40;
+    for (var i = 0; i < n; i++){
+      if (size > Math.floor(budget / 2)){ if (cur){ out.push({k:cur}); cur = 0; used = 0; } out.push({k:1, solo:true}); continue; }
+      if (cur && (cur >= batch || used + size > budget)){ out.push({k:cur}); cur = 0; used = 0; }
+      cur++; used += size;
+    }
+    if (cur) out.push({k:cur});
+    return out;
+  }
+  function fmt(n){ return n.toLocaleString("en-US"); }
+  function calc(){
+    var n = +$("in-n").value, s = +$("in-s").value, b = +$("in-b").value, c = +$("in-c").value;
+    $("o-n").textContent = fmt(n); $("o-s").textContent = fmt(s); $("o-b").textContent = b; $("o-c").textContent = fmt(c);
+    var g = groups(n, s, b, c), solo = 0;
+    var box = $("cells"); box.innerHTML = "";
+    var shown = 0;
+    g.forEach(function(x){
+      if (x.solo && b > 1) solo++;
+      if (shown > 700) return;
+      var d = document.createElement("div"); d.className = "grp" + (x.solo && b > 1 && n > 1 ? " solo" : "");
+      for (var j = 0; j < x.k; j++){ d.appendChild(document.createElement("i")); }
+      shown += x.k; box.appendChild(d);
+    });
+    $("k-calls").textContent = fmt(g.length); $("k-naive").textContent = fmt(n); $("k-solo").textContent = fmt(solo);
+  }
+  ["in-n","in-s","in-b","in-c"].forEach(function(id){ $(id).addEventListener("input", calc); });
+  document.querySelectorAll("#calc .presets .btn").forEach(function(b){ b.addEventListener("click", function(){ $("in-n").value = b.dataset.n; $("in-s").value = b.dataset.s; $("in-b").value = 16; $("in-c").value = 24000; calc(); }); });
+  calc();
+
+  /* ---------------------------------------------------------- tree frames */
+  var TF = [
+    "Root Agent 0 is running and holds 1 of 2 agent slots.",
+    "It calls delegate_map over 3 items. Three child Agents are created.",
+    "The root gives its slot back while it waits, so 0.1 and 0.2 take both slots and 0.3 waits.",
+    "0.2 delegates once more. 0.2.1 runs at depth 2, the maximum.",
+    "0.2.1 tries to delegate again and gets DelegationRefused. It must use code, ask and ask_map."
+  ];
+  var SLOTS = ["root holds 1 of 2","root holds 1 of 2","0.1 and 0.2 hold 2 of 2; 0.3 queued","0.2 hands its slot to 0.2.1","0.2.1 works at the bottom"];
+  var tf = TF.length - 1;
+  function tree(){
+    document.querySelectorAll("#tree [data-f]").forEach(function(el){ var f = +el.getAttribute("data-f"); el.style.opacity = f <= tf ? 1 : .12; el.style.transition = "opacity .3s"; });
+    $("tree-cap").textContent = (tf + 1) + "/" + TF.length + " · " + TF[tf];
+    $("slot-line").textContent = SLOTS[tf];
+  }
+  $("tree-next").addEventListener("click", function(){ tf = (tf + 1) % TF.length; tree(); });
+  $("tree-prev").addEventListener("click", function(){ tf = (tf - 1 + TF.length) % TF.length; tree(); });
+  tree();
+
+  /* ---------------------------------------------------------- tooltips */
+  var tip = $("tip");
+  document.querySelectorAll("[data-tip]").forEach(function(el){
+    el.setAttribute("tabindex", "0");
+    function show(e){ tip.textContent = el.getAttribute("data-tip"); tip.style.opacity = 1; var r = el.getBoundingClientRect(); var x = (e && e.clientX) || r.left + 20, y = (e && e.clientY) || r.top; tip.style.left = Math.min(x + 12, window.innerWidth - 280) + "px"; tip.style.top = (y + 16) + "px"; }
+    el.addEventListener("mousemove", show); el.addEventListener("focus", function(){ show(null); });
+    el.addEventListener("mouseleave", function(){ tip.style.opacity = 0; }); el.addEventListener("blur", function(){ tip.style.opacity = 0; });
+  });
+
+  /* ---------------------------------------------------------- toc highlight */
+  var links = {}; document.querySelectorAll("#toc a").forEach(function(a){ links[a.getAttribute("href").slice(1)] = a; });
+  if ("IntersectionObserver" in window){
+    var io = new IntersectionObserver(function(es){ es.forEach(function(e){ if (e.isIntersecting){ Object.values(links).forEach(function(a){ a.classList.remove("on"); }); var a = links[e.target.id]; if (a){ a.classList.add("on"); if (a.scrollIntoView && window.innerWidth <= 980){ try{ a.parentElement.parentElement.scrollLeft = a.offsetLeft - 16; }catch(_){} } } } }); }, {rootMargin:"-30% 0px -60% 0px"});
+    document.querySelectorAll("main section").forEach(function(s){ io.observe(s); });
+  }
+})();
+</script>
+</body>
+</html>

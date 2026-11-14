@@ -682,7 +682,9 @@ def test_doctor_reports_a_broken_sandbox_launcher_and_exits_1(capsys, make_confi
     config = make_config(extra=f"[sandbox]\nlauncher = [{json.dumps(system_tool('false'))}]")
     code, out, _ = run_cli(capsys, "doctor", "--config", config)
     row = sandbox_row(out)
-    assert code == 1 and row.strip().startswith("x") and "sandbox failed to start" in row
+    # `false` exits at once, so the host sees either a closed pipe or no ready message, depending on timing
+    assert code == 1 and row.strip().startswith("x")
+    assert "sandbox failed to start" in row or "sandbox pipe closed" in row
     assert "launcher: " in row
     assert "default model  fake:m" in out  # the rest of the report still runs
 

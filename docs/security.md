@@ -117,6 +117,8 @@ docker run --rm -i --network none --read-only --tmpfs /tmp -w /tmp
   --user 65534:65534 ghcr.io/ishaangupta-yb/rlm-ig-sandbox:<version>
 ```
 
+If the container cannot start, the error shows Docker's own message plus a hint for a missing image, a stopped Docker daemon, or an image without `python3`, and `rlm doctor --sandbox docker` is the quickest way to check (see [Troubleshooting](troubleshooting.md#sandbox-failed-to-start)).
+
 | Flag | Effect |
 | --- | --- |
 | `--network none` | No network at all inside the container. |

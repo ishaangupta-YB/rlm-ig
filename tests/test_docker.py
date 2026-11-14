@@ -16,6 +16,7 @@ import time
 import pytest
 
 import rlm_ig as rlm
+from rlm_ig.errors import SandboxError
 from rlm_ig.models.scripted import Scripted
 from rlm_ig.sandbox import Sandbox, SandboxOptions
 from rlm_ig.sandbox.host import PLAIN_IMAGE, sandbox_image
@@ -177,3 +178,37 @@ def test_default_preset_image_has_the_documented_libraries(cfg):
     result = rlm.run("Do the task.", model=Scripted([block(code)]), config=config)
     assert result.ok, result.error
     assert result.answer == {"uid": 65534, "libs": ["dateutil", "numpy", "pandas", "regex"]}
+
+
+# ------------------------------------------------------------ start-up failures
+
+
+def _start_error(options: SandboxOptions) -> str:
+    """Start a sandbox that is expected to fail; return the SandboxError's message."""
+
+    async def go():
+        sandbox = Sandbox(options)
+        try:
+            await sandbox.start(None)
+        except SandboxError as exc:
+            return str(exc)
+        finally:
+            await sandbox.close()
+        raise AssertionError("the sandbox started")
+
+    return run_async(go())
+
+
+def test_a_missing_image_shows_dockers_error_and_a_hint():
+    message = _start_error(SandboxOptions(preset="docker:rlm-ig-test-no-such-image:0"))
+    assert message.startswith("sandbox failed to start: exit code "), message
+    # The registry's wording after this line differs online and offline, so it is not checked.
+    assert "Unable to find image 'rlm-ig-test-no-such-image:0' locally" in message
+    assert "Hint: rlm-ig-test-no-such-image:0 is not available" in message
+    assert "Run 'docker run --help'" not in message
+
+
+def test_an_unknown_launcher_flag_shows_dockers_error(plain_image):
+    message = _start_error(SandboxOptions(launcher=["docker", "run", "--bogus-flag-for-test", plain_image]))
+    assert message.startswith("sandbox failed to start: exit code "), message
+    assert "unknown flag: --bogus-flag-for-test" in message

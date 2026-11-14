@@ -40,6 +40,13 @@ Planned as 0.2.0.
   HTTP request that is still in flight. `docker stop` no longer has to kill it.
 - An operating system error, such as an unwritable session directory, is
   reported as `rlm: ...` instead of a traceback.
+- When the REPL worker fails to start, the error now shows the launcher's real
+  stderr instead of only its last line, which for Docker was always
+  `Run 'docker run --help' for more information`, plus a hint for a missing
+  image, a stopped Docker daemon, or an image without `python3`.
+- A launcher that exits immediately is always reported as
+  `sandbox failed to start: exit code N; ...`, never as a bare
+  `sandbox pipe closed`.
 
 ## [0.1.0] - 2026-11-14
 

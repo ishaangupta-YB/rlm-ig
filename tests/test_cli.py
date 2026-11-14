@@ -682,11 +682,49 @@ def test_doctor_reports_a_broken_sandbox_launcher_and_exits_1(capsys, make_confi
     config = make_config(extra=f"[sandbox]\nlauncher = [{json.dumps(system_tool('false'))}]")
     code, out, _ = run_cli(capsys, "doctor", "--config", config)
     row = sandbox_row(out)
-    # `false` exits at once, so the host sees either a closed pipe or no ready message, depending on timing
     assert code == 1 and row.strip().startswith("x")
-    assert "sandbox failed to start" in row or "sandbox pipe closed" in row
+    assert "sandbox failed to start" in row
     assert "launcher: " in row
     assert "default model  fake:m" in out  # the rest of the report still runs
+
+
+# Real stderr from `docker run` with an image that does not exist (Docker 29.7.2).
+MISSING_IMAGE = (
+    "Unable to find image 'ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0' locally\n"
+    "docker: Error response from daemon: failed to resolve reference "
+    '"ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0": ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0: not found\n'
+    "\n"
+    "Run 'docker run --help' for more information\n"
+)
+MISSING_IMAGE_SUMMARY = (
+    "Unable to find image 'ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0' locally | docker: Error response from "
+    'daemon: failed to resolve reference "ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0": '
+    "ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0: not found"
+)
+
+
+def fake_docker_config(make_config):
+    """A config whose sandbox launcher fails the way `docker run` does for a missing image."""
+    launcher = [sys.executable, "-c", f"import sys; sys.stderr.write({MISSING_IMAGE!r}); sys.exit(125)"]
+    return make_config(extra=f"[sandbox]\nlauncher = {json.dumps(launcher)}")
+
+
+def test_doctor_shows_the_launchers_error_and_a_hint(capsys, make_config, bare_path):
+    code, out, _ = run_cli(capsys, "doctor", "--config", fake_docker_config(make_config))
+    row = sandbox_row(out)
+    assert code == 1 and row.strip().startswith("x")
+    assert f"sandbox failed to start: exit code 125; {MISSING_IMAGE_SUMMARY}. Hint: " in row
+    assert "ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0 is not available locally or in its registry" in row
+    assert " (launcher: " in row
+    assert "Run 'docker run --help'" not in row
+
+
+def test_run_reports_the_launchers_error_and_a_hint(capsys, make_config):
+    code, out, _ = run_cli(capsys, "t", "--config", fake_docker_config(make_config), "--json")
+    result = json.loads(out)
+    assert code == 1 and result["status"] == "failed"
+    assert MISSING_IMAGE_SUMMARY in result["error"] and "Hint: " in result["error"]
+    assert "Run 'docker run --help'" not in result["error"]
 
 
 def test_doctor_reports_a_missing_launcher_program(capsys, make_config, bare_path):

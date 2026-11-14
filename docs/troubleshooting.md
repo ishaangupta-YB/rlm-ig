@@ -103,7 +103,7 @@ On the CLI the exit code is 2. The answer is real but may be incomplete, and the
 - `StepsExhausted: agent 0 did not submit an answer (out of turns)`: the forced wrap-up turn did not call `submit`. Raise `max_steps`, or use a stronger model.
 - `StepsExhausted: agent 0: final answer did not match the schema (...)`: the model could not produce a value that satisfies your `schema`, even after being shown the errors. Loosen the schema or check that it is satisfiable from the data.
 - `ModelError: ...`: the backend failed. The message names it.
-- `SandboxError: sandbox failed to start: ...`: the REPL worker could not start. `rlm doctor` shows whether the sandbox starts. If you set `sandbox.launcher` or `sandbox.python`, check that command by hand.
+- `SandboxError: sandbox failed to start: ...`: the REPL worker could not start. See [sandbox failed to start](#sandbox-failed-to-start).
 
 ### `max_usd` or another limit seems to be ignored
 
@@ -174,6 +174,24 @@ Nothing has run since the trace directory was set, or tracing is off. `rlm docto
 0 for `ok`, 2 for `partial`, 1 for `failed` or an error before the run, and 130 after Ctrl-C. A `failed` result prints no answer on stdout, and `-o FILE` does not write the file. The error is shown in the progress output, and with `-q` or `--json` also on stderr as `rlm: <error>`. With `--json`, stdout still carries the JSON result, with `status` and `error` set.
 
 ## The REPL
+
+### sandbox failed to start
+
+The REPL worker, or the launcher wrapped around it, exited before the worker was ready. The message gives the exit code and the last few meaningful lines of its stderr, joined with ` | `, with boilerplate such as `Run 'docker run --help' for more information` left out. When a launcher or the Docker preset is in use, a hint for the common causes follows. `rlm doctor` shows the same message in its sandbox row, with the launcher it tried. This is the row for a sandbox image that has not been pulled:
+
+```text
+  x sandbox        sandbox failed to start: exit code 125; Unable to find image 'ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0' locally | docker: Error response from daemon: failed to resolve reference "ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0": ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0: not found. Hint: ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0 is not available locally or in its registry; pull it with `docker pull ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0`, or choose another image with --sandbox docker:IMAGE (launcher: docker run --rm -i --network none --read-only --tmpfs /tmp -w /tmp --cap-drop ALL --security-opt no-new-privileges --memory 1g --pids-limit 256 --user 65534:65534 ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0)
+```
+
+The hints cover three causes:
+
+| Cause | Fix |
+| --- | --- |
+| The image is not pulled, or not published (`Unable to find image`, `pull access denied`, `manifest unknown`, `failed to resolve reference`) | `docker pull IMAGE`, or pick another image with `--sandbox docker:IMAGE`, for example `--sandbox docker:python:3.12-slim` |
+| Docker is not running (`failed to connect to the docker API`, `Cannot connect to the Docker daemon`) | Start Docker Desktop or the docker service, then check that `docker info` works |
+| The image has no `python3` (`executable file not found`) | Use an image with Python 3, or set `sandbox.python` to the interpreter's path in the image |
+
+Any other failure, such as a mistyped flag in a custom `sandbox.launcher`, shows the launcher's own error without a hint: `exit code 125; unknown flag: --bogus`. Run the launcher command by hand to see all of its output. Without a launcher, check `sandbox.python`.
 
 ### `The REPL process stopped (...). It was restarted: `context` is back, but every other variable is gone.`
 

@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import pickle
+import re
 import shutil
 import signal
 import sys
@@ -67,6 +68,46 @@ CONTAINER_FLAGS = (
 SANDBOX_IMAGE_REPO = "ghcr.io/ishaangupta-yb/rlm-ig-sandbox"
 #: the plain interpreter image, for `docker:python:3.12-slim`
 PLAIN_IMAGE = "python:3.12-slim"
+
+
+# Lines a launcher prints after every error, which say nothing about the cause.
+# Docker ends each failed `docker run` with the first one.
+_BOILERPLATE = re.compile(r"^(Run '.*--help' for more information\.?|See '.*--help'\.?|Usage:.*)$")
+_IMAGE_NOT_FOUND = re.compile(r"unable to find image '([^']+)'", re.IGNORECASE)
+_DAEMON_DOWN = (
+    "cannot connect to the docker daemon",
+    "failed to connect to the docker api",
+    "is the docker daemon running",
+)
+_IMAGE_MISSING = ("pull access denied", "manifest unknown", "failed to resolve reference")
+
+
+def _stderr_summary(tail: str, *, keep: int = 3, width: int = 300) -> str:
+    """The last few meaningful lines of a worker's or launcher's stderr, on one line."""
+    lines = [line.strip() for line in tail.splitlines()]
+    lines = [line for line in lines if line and not _BOILERPLATE.match(line)]
+    kept = lines[-keep:] if keep > 0 else []
+    return " | ".join(line if len(line) <= width else line[: width - 1] + "…" for line in kept)
+
+
+def _startup_hint(tail: str) -> str:
+    """Advice for the common reasons a container launcher fails at once, or ``""``."""
+    text = tail.lower()
+    # Before the image rules: this message also says "not found".
+    if "executable file not found" in text:
+        return (
+            "the image has no python3 on its PATH; use an image with Python 3, or set sandbox.python to its interpreter"
+        )
+    if any(marker in text for marker in _DAEMON_DOWN):
+        return "Docker is not running; start Docker Desktop or the docker service, then check that `docker info` works"
+    found = _IMAGE_NOT_FOUND.search(tail)
+    if found or any(marker in text for marker in _IMAGE_MISSING):
+        image = found.group(1) if found else "the image"
+        return (
+            f"{image} is not available locally or in its registry; pull it with `docker pull {image}`, "
+            "or choose another image with --sandbox docker:IMAGE"
+        )
+    return ""
 
 
 def sandbox_image() -> str:
@@ -241,12 +282,20 @@ class Sandbox:
         self._stderr_tail = b""
         self._stderr_task = asyncio.ensure_future(self._drain_stderr(self._proc))
         assert self._proc.stdin is not None
-        self._proc.stdin.write(WORKER_SOURCE)
-        await self._send(self._init or {"op": "init"})
-        ready = await self._recv()
+        try:
+            self._proc.stdin.write(WORKER_SOURCE)
+            await self._send(self._init or {"op": "init"})
+        except (SandboxError, BrokenPipeError, ConnectionResetError):
+            # The launcher exited before reading its input (no daemon, no image,
+            # a bad flag). That is a failed start, and its stderr says why.
+            ready = None
+        else:
+            ready = await self._recv()
         if ready is None or ready.get("op") != "ready":
             detail = await self._death_note()
-            raise SandboxError(f"sandbox failed to start: {detail}")
+            hint = _startup_hint(self._stderr_tail.decode("utf-8", "replace")) if self.options.prefix() else ""
+            hint_part = f". Hint: {hint}" if hint else ""
+            raise SandboxError(f"sandbox failed to start: {detail}{hint_part}")
         self.summary = ready.get("summary", "")
         self.context_size = int(ready.get("size") or 0)
         self.python_version = ready.get("python", "")
@@ -456,13 +505,16 @@ class Sandbox:
         if proc is not None:
             with contextlib.suppress(Exception):
                 code = await asyncio.wait_for(proc.wait(), 2)
-        await asyncio.sleep(0.05)
-        tail = self._stderr_tail.decode("utf-8", "replace").strip()
-        last = tail.splitlines()[-1] if tail else ""
+        if self._stderr_task is not None:
+            # Let the drain reach end of file, but never wait long for it.
+            # asyncio.wait, unlike wait_for, does not cancel the task on timeout.
+            await asyncio.wait({self._stderr_task}, timeout=1.0)
+        summary = _stderr_summary(self._stderr_tail.decode("utf-8", "replace"))
+        suffix = f"; {summary}" if summary else ""
         if code is not None and code < 0:
             with contextlib.suppress(ValueError):
-                return f"killed by {signal.Signals(-code).name}" + (f"; {last}" if last else "")
-        return f"exit code {code}" + (f"; {last}" if last else "")
+                return f"killed by {signal.Signals(-code).name}{suffix}"
+        return f"exit code {code}{suffix}"
 
     def _interrupt(self) -> bool:
         """Ask the running cell to stop. False means it cannot be interrupted."""

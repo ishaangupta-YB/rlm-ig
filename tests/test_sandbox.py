@@ -7,6 +7,7 @@ import pytest
 
 from rlm_ig.errors import SandboxError
 from rlm_ig.sandbox import Sandbox, SandboxOptions
+from rlm_ig.sandbox.host import _startup_hint, _stderr_summary
 
 from helpers import run_async
 
@@ -256,3 +257,190 @@ def test_launcher_prefix_wraps_the_worker():
 def test_missing_interpreter_is_a_clear_error():
     with pytest.raises(SandboxError, match="could not start"):
         session(lambda sb: sb.run("1"), options=SandboxOptions(python="/no/such/python"))
+
+
+# ------------------------------------------------------------ start-up failures
+
+# Real stderr from Docker 29.7.2 for the failures a launcher hits most often.
+MISSING_IMAGE = (
+    "Unable to find image 'ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0' locally\n"
+    "docker: Error response from daemon: failed to resolve reference "
+    '"ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0": ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0: not found\n'
+    "\n"
+    "Run 'docker run --help' for more information\n"
+)
+NO_SUCH_REPO = (
+    "Unable to find image 'rlm-no-such-image-xyz:1' locally\n"
+    "docker: Error response from daemon: pull access denied for rlm-no-such-image-xyz, "
+    "repository does not exist or may require 'docker login'\n"
+    "\n"
+    "Run 'docker run --help' for more information\n"
+)
+BAD_FLAG = (
+    "unknown flag: --bogus\n"
+    "\n"
+    "Usage:  docker run [OPTIONS] IMAGE [COMMAND] [ARG...]\n"
+    "\n"
+    "Run 'docker run --help' for more information\n"
+)
+NO_PYTHON = (
+    "docker: Error response from daemon: failed to create task for container: failed to create shim task: "
+    "OCI runtime create failed: runc create failed: unable to start container process: error during container "
+    'init: exec: "python3": executable file not found in $PATH\n'
+    "\n"
+    "Run 'docker run --help' for more information\n"
+)
+DAEMON_DOWN = (
+    "failed to connect to the docker API at unix:///Users/ishaan/.docker/run/docker.sock; check if the path "
+    "is correct and if the daemon is running: dial unix /Users/ishaan/.docker/run/docker.sock: connect: "
+    "no such file or directory\n"
+)
+OLD_DAEMON_DOWN = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n"
+
+DOCKER_DOWN_HINT = (
+    "Docker is not running; start Docker Desktop or the docker service, then check that `docker info` works"
+)
+
+
+def _missing(image):
+    return (
+        f"{image} is not available locally or in its registry; pull it with `docker pull {image}`, "
+        "or choose another image with --sandbox docker:IMAGE"
+    )
+
+
+@pytest.mark.parametrize(
+    "stderr, summary, hint",
+    [
+        (
+            MISSING_IMAGE,
+            "Unable to find image 'ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0' locally | docker: Error response "
+            'from daemon: failed to resolve reference "ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0": '
+            "ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0: not found",
+            _missing("ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0"),
+        ),
+        (
+            NO_SUCH_REPO,
+            "Unable to find image 'rlm-no-such-image-xyz:1' locally | docker: Error response from daemon: pull "
+            "access denied for rlm-no-such-image-xyz, repository does not exist or may require 'docker login'",
+            _missing("rlm-no-such-image-xyz:1"),
+        ),
+        (BAD_FLAG, "unknown flag: --bogus", ""),
+        (
+            NO_PYTHON,
+            NO_PYTHON.splitlines()[0],
+            "the image has no python3 on its PATH; use an image with Python 3, or set sandbox.python to its interpreter",
+        ),
+        (DAEMON_DOWN, DAEMON_DOWN.strip(), DOCKER_DOWN_HINT),
+        (OLD_DAEMON_DOWN, OLD_DAEMON_DOWN.strip(), DOCKER_DOWN_HINT),
+    ],
+    ids=["missing-image", "no-such-repo", "bad-flag", "no-python", "daemon-down", "old-daemon-down"],
+)
+def test_stderr_summary_and_startup_hint_for_real_docker_errors(stderr, summary, hint):
+    assert _stderr_summary(stderr) == summary
+    assert _startup_hint(stderr) == hint
+
+
+def test_the_no_python_line_is_kept_whole():
+    line = NO_PYTHON.splitlines()[0]
+    assert len(line) == 263 and "…" not in _stderr_summary(NO_PYTHON)
+
+
+def test_stderr_summary_of_nothing_is_empty():
+    assert _stderr_summary("") == ""
+    assert _stderr_summary("  \n\t\n   \n") == ""
+
+
+def test_stderr_summary_keeps_the_last_three_lines_of_a_traceback():
+    traceback = "\n".join(
+        [
+            "Traceback (most recent call last):",
+            '  File "<string>", line 1, in <module>',
+            '  File "/app/a.py", line 2, in run',
+            "    step()",
+            '  File "/app/b.py", line 3, in step',
+            "    load()",
+            '  File "/app/c.py", line 4, in load',
+            "    open(path)",
+            '  File "/app/d.py", line 5, in open',
+            "FileNotFoundError: [Errno 2] No such file or directory: 'x'",
+        ]
+    )
+    assert len(traceback.splitlines()) == 10
+    assert _stderr_summary(traceback) == (
+        "open(path) | File \"/app/d.py\", line 5, in open | FileNotFoundError: [Errno 2] No such file or directory: 'x'"
+    )
+
+
+def test_stderr_summary_shortens_long_lines():
+    summary = _stderr_summary("x" * 500)
+    assert len(summary) == 300 and summary == "x" * 299 + "…"
+
+
+def test_stderr_summary_drops_see_help_boilerplate():
+    assert _stderr_summary("docker: 'bogus' is not a docker command.\nSee 'docker run --help'.\n") == (
+        "docker: 'bogus' is not a docker command."
+    )
+
+
+def _start_error(options, context=None):
+    """Start a sandbox that is expected to fail; return the SandboxError's message."""
+
+    async def go():
+        sandbox = Sandbox(options)
+        try:
+            await sandbox.start(context)
+        except SandboxError as exc:
+            return str(exc)
+        finally:
+            await sandbox.close()
+        raise AssertionError("the sandbox started")
+
+    return run_async(go())
+
+
+def _fake_launcher(stderr, code):
+    """A launcher that prints ``stderr`` and exits with ``code`` without reading its input, as docker does."""
+    return [sys.executable, "-c", f"import sys; sys.stderr.write({stderr!r}); sys.exit({code})"]
+
+
+def test_a_failing_launcher_reports_its_stderr_and_a_hint():
+    message = _start_error(SandboxOptions(launcher=_fake_launcher(MISSING_IMAGE, 125)))
+    assert message.startswith("sandbox failed to start: exit code 125; Unable to find image")
+    assert "not found. Hint: ghcr.io/ishaangupta-yb/rlm-ig-sandbox:0.2.0 is not available" in message
+    assert "Run 'docker run --help'" not in message
+
+
+def test_a_launcher_that_exits_at_once_is_always_a_failed_start():
+    # The launcher exits without reading stdin, so writing the worker source and the init
+    # message races its exit. A context larger than any pipe buffer makes the write hit the
+    # closed pipe every time (on Linux the 32 KB source alone often fits in the buffer).
+    # Every attempt must report the exit code, never a closed pipe.
+    options = SandboxOptions(launcher=[sys.executable, "-c", "import sys; sys.exit(3)"])
+    context = "x" * 1_000_000
+    for attempt in range(25):
+        message = _start_error(options, context)
+        assert message.startswith("sandbox failed to start: exit code 3"), (attempt, message)
+        assert "pipe closed" not in message, (attempt, message)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses an executable script as the interpreter")
+def test_a_failed_start_without_a_launcher_gets_no_hint(tmp_path):
+    fake = tmp_path / "fake-python"
+    fake.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write({MISSING_IMAGE!r})\nsys.exit(125)\n")
+    fake.chmod(0o755)
+    message = _start_error(SandboxOptions(python=str(fake)))
+    assert message.startswith("sandbox failed to start: exit code 125; Unable to find image")
+    assert "Hint:" not in message
+
+
+def test_a_crash_mid_run_gets_no_hint_and_restarts():
+    async def body(sb):
+        crashed = await sb.run("import os\nos._exit(7)")
+        after = await sb.run("print(context)")
+        return crashed, after
+
+    crashed, after = session(body, context="ctx")
+    assert crashed.restarted and "exit code 7" in crashed.error
+    assert "Hint:" not in crashed.error
+    assert after.stdout.strip() == "ctx"

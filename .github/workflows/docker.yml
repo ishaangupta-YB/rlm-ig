@@ -1,0 +1,181 @@
+name: Docker
+
+# Container images on GitHub Container Registry:
+#
+#   ghcr.io/ishaangupta-yb/rlm-ig          the rlm command (Dockerfile, target app)
+#   ghcr.io/ishaangupta-yb/rlm-ig:*-claude the same plus Claude Code (target claude)
+#   ghcr.io/ishaangupta-yb/rlm-ig-sandbox  what the REPL worker runs in (docker/sandbox.Dockerfile)
+#
+#   pull request  -> build amd64 and smoke-test, push nothing
+#   push to main  -> also push multi-arch images tagged edge
+#   tag vX.Y.Z    -> also push X.Y.Z, X.Y and latest
+#
+# Pushed images carry BuildKit provenance and an SBOM, and a signed GitHub
+# build provenance attestation. See RELEASING.md for the one-time setup.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    # Builds each image for amd64, loads it, and smoke-tests it. Never pushes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the tag matches the package version
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/rlm_ig/__init__.py').read_text()).group(1))")
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match __version__ $version"
+            exit 1
+          fi
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the app image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: app
+          load: true
+          tags: rlm-ig:smoke
+          cache-from: type=gha,scope=app
+      - name: Build the claude image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: claude
+          load: true
+          tags: rlm-ig:smoke-claude
+          cache-from: type=gha,scope=claude
+      - name: Build the sandbox image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: docker
+          file: docker/sandbox.Dockerfile
+          load: true
+          tags: rlm-ig-sandbox:smoke
+          cache-from: type=gha,scope=sandbox
+      - name: Smoke test the app image
+        run: |
+          set -eux
+          version=$(python3 -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/rlm_ig/__init__.py').read_text()).group(1))")
+          test "$(docker run --rm rlm-ig:smoke --version)" = "rlm-ig $version"
+          test "$(docker run --rm --entrypoint id rlm-ig:smoke -u)" = "10001"
+          docker run --rm rlm-ig:smoke demo > demo.json
+          grep -q '"service": "billing"' demo.json
+          # stdin reaches the run with -i; a command provider stands in for the model
+          mkdir smoke
+          printf '%s\n' 'print("```python\nsubmit(context.strip())\n```")' > smoke/echo.py
+          printf '%s\n' '[providers.echo]' 'kind = "command"' 'command = ["python3", "/work/echo.py"]' > smoke/rlm.toml
+          out=$(printf 'piped data\n' | docker run --rm -i -v "$PWD/smoke:/work:ro" rlm-ig:smoke "Echo it" -m echo:x -q --no-trace)
+          test "$out" = "piped data"
+          # an arbitrary uid can still write traces and sessions
+          printf 'from a file\n' > smoke/data.txt
+          out=$(docker run --rm --user 4321:4321 -e HOME=/tmp -v "$PWD/smoke:/work:ro" rlm-ig:smoke "Echo it" -f data.txt -m echo:x -q --session s)
+          test "$out" = "from a file"
+      - name: Smoke test the claude image
+        run: |
+          set -eux
+          docker run --rm --entrypoint claude rlm-ig:smoke-claude --version
+          docker run --rm rlm-ig:smoke-claude doctor | grep -E '^\s+\+ claude-code'
+      - name: Smoke test the sandbox image
+        run: |
+          set -eux
+          test "$(docker run --rm rlm-ig-sandbox:smoke id -u)" = "65534"
+          docker run --rm --network none --read-only --tmpfs /tmp rlm-ig-sandbox:smoke \
+            python3 -c "import numpy, pandas, dateutil, regex; print('ok')"
+      - name: Image sizes
+        run: docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep -E '^rlm-ig'
+
+  publish:
+    if: github.event_name == 'push'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: app
+            image: ghcr.io/ishaangupta-yb/rlm-ig
+            context: .
+            file: Dockerfile
+            target: app
+            suffix: ""
+          - name: claude
+            image: ghcr.io/ishaangupta-yb/rlm-ig
+            context: .
+            file: Dockerfile
+            target: claude
+            suffix: "-claude"
+          - name: sandbox
+            image: ghcr.io/ishaangupta-yb/rlm-ig-sandbox
+            context: docker
+            file: docker/sandbox.Dockerfile
+            target: ""
+            suffix: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ matrix.image }}
+          flavor: |
+            latest=false
+            suffix=${{ matrix.suffix }}
+          tags: |
+            type=edge,branch=main
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=claude,suffix=,enable=${{ github.ref_type == 'tag' && matrix.name == 'claude' }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

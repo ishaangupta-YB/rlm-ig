@@ -41,7 +41,7 @@ rlm doctor
 It starts a REPL worker, looks for each backend, shows where your config and traces live, and says which model it would use by default. Abridged output from a machine with Claude Code installed:
 
 ```text
-rlm-ig 0.1.0
+rlm-ig 0.2.0
 
 runtime
   + python         3.13.18 (/path/to/.venv/bin/python)

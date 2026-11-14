@@ -77,8 +77,9 @@ These are the fields of `[sandbox]` in a file, or of `rlm.SandboxOptions` in Pyt
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `python` | `str` or `None` | `None` | Interpreter for the worker. `None` means the interpreter running rlm-ig, or `python3` when a launcher is set. |
-| `launcher` | `list[str]` or `str` | `[]` | A command prefix that wraps the worker, for example to run it in a container. A string is split on spaces. See [Security](security.md#real-isolation-with-a-launcher). |
+| `python` | `str` or `None` | `None` | Interpreter for the worker. `None` means the interpreter running rlm-ig, or `python3` when a launcher or preset is set. |
+| `preset` | `str` or `None` | `None` | `"docker"`, `"docker:IMAGE"`, `"podman"` or `"podman:IMAGE"`: run the worker in a locked-down container. See [below](#the-container-preset). |
+| `launcher` | `list[str]` or `str` | `[]` | A command prefix that wraps the worker, for example to run it in a container. A string is split into words the way a shell would, so `"docker run --label 'a b' img"` keeps `a b` together. Wins over `preset`. See [Security](security.md#real-isolation-with-a-launcher). |
 | `env` | `dict[str, str]` | `{}` | Environment variables to set in the worker. |
 | `pass_env` | `list[str]` | `[]` | Names of your environment variables to pass through to the worker, in addition to the built-in allowlist. |
 | `inherit_env` | `bool` | `False` | Pass the whole environment, credentials included. |
@@ -86,6 +87,25 @@ These are the fields of `[sandbox]` in a file, or of `rlm.SandboxOptions` in Pyt
 | `cell_timeout` | `float` | `120.0` | Overwritten by the top-level `cell_timeout`. Set it there. |
 | `capture_limit` | `int` | `200000` | Characters of a cell's output kept at each end. The middle is dropped. |
 | `workdir` | `str` or `None` | `None` | A fixed working directory shared by all workers, not deleted afterwards. `None` gives each agent its own temporary directory. |
+
+### The container preset
+
+`preset = "docker"` is shorthand for this launcher:
+
+```text
+docker run --rm -i --network none --read-only --tmpfs /tmp -w /tmp
+  --cap-drop ALL --security-opt no-new-privileges --memory 1g --pids-limit 256
+  --user 65534:65534 ghcr.io/ishaangupta-yb/rlm-ig-sandbox:<version>
+```
+
+`<version>` is the installed rlm-ig version, so the image always matches the package. `"docker:IMAGE"` uses another image, for example `"docker:python:3.12-slim"`. `"podman"` and `"podman:IMAGE"` use the same flags with `podman`. The same choice is available as `--sandbox docker[:IMAGE]` on the command line and as `RLM_SANDBOX` in the environment. What the image contains and what has been tested is in [Security](security.md#the-docker-preset).
+
+When both are set in the same place, `launcher` wins. Across places, the later source wins as usual: `--sandbox docker` or `RLM_SANDBOX` replaces a `launcher` from a config file.
+
+```toml
+[sandbox]
+preset = "docker"
+```
 
 ## Environment variables
 
@@ -103,18 +123,23 @@ Read by `Config.load` (so not when you pass `config=`):
 | `RLM_MAX_PARALLEL` | `max_parallel` |
 | `RLM_TIMEOUT` | `timeout` |
 | `RLM_TRACE_DIR` | `trace_dir` |
+| `RLM_SANDBOX` | `sandbox.preset`, for example `docker` or `docker:python:3.12-slim` |
+| `RLM_SANDBOX_LAUNCHER` | `sandbox.launcher`, split into words the way a shell would |
+| `RLM_SANDBOX_PYTHON` | `sandbox.python` |
 
-An empty variable is treated as unset. `max_tokens`, `cell_timeout`, `output_limit`, `ask_limit`, `ask_batch`, `ask_batch_chars`, `inherit_tools`, `passthrough_guard`, `trace`, `verbosity`, `sandbox`, `providers`, `pricing` and `mcp` have no environment variable.
+An empty variable is treated as unset. `max_tokens`, `cell_timeout`, `output_limit`, `ask_limit`, `ask_batch`, `ask_batch_chars`, `inherit_tools`, `passthrough_guard`, `trace`, `verbosity`, `providers`, `pricing`, `mcp` and the other `sandbox` fields have no environment variable.
 
 Others that rlm-ig reads:
 
 | Variable | Used for |
 | --- | --- |
 | `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | Where the user file and the traces live by default. |
+| `RLM_SESSION_DIR` | Where `rlm --session NAME` keeps `NAME.json`. Default `./.rlm/sessions`. A `--session` value that contains a path separator or ends in `.json` is used as given. |
 | `RLM_DEBUG_DIR` | An existing directory where the Claude Code backend keeps the raw event stream of each CLI process. See [Tracing](tracing.md#debugging-the-backend). |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` | The Anthropic backend, and default-backend detection. |
 | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY` | The OpenAI-compatible presets. |
 | `OPENAI_BASE_URL` | Base URL for the `openai` provider when `base_url` is not set. |
+| `OLLAMA_HOST` | Address of the Ollama server for the `ollama` provider when `base_url` is not set: `host`, `host:port`, `http://host:port` or `https://...`. `/v1` is appended. A bare host gets port 11434, as in Ollama. |
 | `NO_COLOR` | Turns off colour in progress output. |
 
 ## CLI flags
@@ -129,6 +154,7 @@ Flags are overrides, the last source in the order above:
 | `--timeout` | `timeout` |
 | `--parallel` | `max_parallel` |
 | `--no-trace` | `trace = false` |
+| `--sandbox docker[:IMAGE]` | `sandbox.preset` (also on `rlm doctor`) |
 | `-q`, `-v` | `verbosity` 0 and 2 |
 | `--config FILE` | the config file to use |
 
@@ -166,7 +192,7 @@ verbosity = "normal"
 memory_mb = 2048
 pass_env = ["MY_DATA_TOKEN"]
 env = { TZ = "UTC" }
-# launcher = ["docker", "run", "--rm", "-i", "--network", "none", "python:3.12-slim"]
+# preset = "docker"     # run model code in a locked-down container (needs Docker)
 
 [providers.claude-code]
 effort = "low"

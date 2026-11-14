@@ -7,7 +7,8 @@ This page says what rlm-ig does and does not protect, so you can decide what to 
 - In a run, a model writes Python and rlm-ig executes it. That code runs in a **subprocess of your user. It is not a security boundary.** It can read your files and use the network.
 - A few things reduce accidents: a scrubbed environment, a throwaway working directory, cell timeouts, an optional memory limit. They do not stop code that is trying to do harm.
 - The host never unpickles anything a worker produced. Workers only ever send it JSON.
-- For real isolation, run the worker in a container or similar with `sandbox.launcher`. That is a one-line setting, and it is the recommended setup for untrusted data or an unattended run. Tools and MCP servers still run on the host.
+- For real isolation, run the worker in a container: `--sandbox docker` on the command line, or `preset = "docker"` under `[sandbox]`. Anything else that can wrap a process works through `sandbox.launcher`. This is the recommended setup for untrusted data or an unattended run. Tools and MCP servers still run on the host.
+- Running `rlm` itself in the Docker image is a convenience, not this isolation: there the model's code shares the network that `rlm` uses. See [Running rlm in a container](#running-rlm-in-a-container).
 - Text in your data can try to steer the model. Treat the data as untrusted input and limit what the model can reach.
 
 ## The REPL worker is an ordinary subprocess
@@ -93,14 +94,64 @@ Putting the worker in a container does not change this. The tool call crosses th
 
 ## Real isolation with a launcher
 
+### The Docker preset
+
+The short way to run the worker in a locked-down container:
+
+```bash
+rlm "..." -f data.log --sandbox docker
+```
+
+or in `rlm.toml`:
+
+```toml
+[sandbox]
+preset = "docker"
+```
+
+or `RLM_SANDBOX=docker` in the environment, or `sandbox={"preset": "docker"}` in Python. It expands to exactly this launcher:
+
+```text
+docker run --rm -i --network none --read-only --tmpfs /tmp -w /tmp
+  --cap-drop ALL --security-opt no-new-privileges --memory 1g --pids-limit 256
+  --user 65534:65534 ghcr.io/ishaangupta-yb/rlm-ig-sandbox:<version>
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--network none` | No network at all inside the container. |
+| `--read-only --tmpfs /tmp -w /tmp` | The image's filesystem cannot be changed. `/tmp` is a writable in-memory directory and the working directory, so code that writes a scratch file still works. |
+| `--cap-drop ALL`, `--security-opt no-new-privileges` | No Linux capabilities, and no way to gain privileges through setuid programs. |
+| `--memory 1g --pids-limit 256` | Bounded memory and number of processes. |
+| `--user 65534:65534` | Runs as `nobody`, not root. |
+
+`<version>` is the installed rlm-ig version, so the sandbox image always comes from the same release as the package. Name another image with `--sandbox docker:IMAGE`, for example `docker:python:3.12-slim` for plain Python or an image of your own with the libraries you need. An explicit `launcher` in the same config source wins over a preset. `--sandbox podman[:IMAGE]` uses the same flags with Podman; **it has not been tested.**
+
+**The sandbox image**, `ghcr.io/ishaangupta-yb/rlm-ig-sandbox`, is built from [`docker/sandbox.Dockerfile`](../docker/sandbox.Dockerfile): `python:3.12-slim` pinned by digest, plus these libraries at pinned versions, so the model's code can import them:
+
+| Library | Version |
+| --- | --- |
+| numpy | 2.5.4 |
+| pandas | 3.1.0 |
+| python-dateutil | 2.9.0.post0 |
+| regex | 2026.9.29 |
+
+It contains no rlm-ig: the worker's source arrives over stdin. It adds no shell tools or compilers to what the base image has, and runs as uid 65534. It is published from version 0.2.0 on; see [RELEASING.md](../RELEASING.md).
+
+**What is tested.** `tests/test_docker.py` runs the preset against a real Docker daemon, in CI on every push and pull request: a run completes and `ask_map` works through the pipe; a connection to `1.1.1.1:53` fails inside the worker; `/tmp` and the working directory are writable and `/` is not; the worker runs as uid 65534 in `/tmp`; a cell past `cell_timeout` gets its container killed and replaced, with no container left behind; closing a sandbox removes its container; and the libraries above import in the sandbox image. These tests use `python:3.12-slim` and an image built from `docker/sandbox.Dockerfile`. A real run through `--sandbox docker` with Claude Code and Claude Haiku is in the [guide](../GUIDE.md#9-run-model-code-in-a-docker-container).
+
+### Any launcher
+
 `sandbox.launcher` is a command prefix. rlm-ig starts the worker as the launcher followed by `python3 -u -c <bootstrap> <size>`. The worker's own source is sent over stdin as the first bytes, then the normal protocol follows on the same pipes. Nothing has to exist on the other side: no mounted directory, no installed rlm-ig. Anything that can start a program and connect its stdin and stdout can wrap it.
 
-A Docker example:
+The preset above is one such prefix. Written out as a launcher, a minimal Docker example is:
 
 ```toml
 [sandbox]
 launcher = ["docker", "run", "--rm", "-i", "--network", "none", "python:3.12-slim"]
 ```
+
+A launcher written as a string is split into words the way a shell would: `launcher = "docker run --label 'a b' img"` gives `["docker", "run", "--label", "a b", "img"]`. `RLM_SANDBOX_LAUNCHER` takes the same string form.
 
 Or in Python:
 
@@ -136,6 +187,16 @@ What to know when you use a launcher:
 - **The scrubbed environment applies to the launcher process too.** If your launcher needs variables, such as `DOCKER_HOST`, list them in `pass_env`. They reach `docker`, not the container, unless you forward them with the launcher's own flags.
 - **`memory_mb` still applies** inside the worker, in addition to any limit your container has.
 - **Only the worker is wrapped.** Tools, MCP servers, and the model CLIs still run on the host.
+
+## Running rlm in a container
+
+The image `ghcr.io/ishaangupta-yb/rlm-ig` runs `rlm` itself in a container, so you do not need Python on your machine. See the [guide](../GUIDE.md#10-run-everything-in-docker) for how to use it. What it does and does not protect:
+
+- **The model's code has the same network access as `rlm`.** Inside that container the REPL worker is an ordinary subprocess of `rlm`, and `rlm` needs the network to reach the model. The container does keep the model's code away from your files: it sees only the directories you mount, and the image runs as an unprivileged user (uid 10001).
+- **For a worker with no network, run `rlm` on your machine with `--sandbox docker`.** That is the configuration the tests above cover.
+- **Never mount `/var/run/docker.sock` into the container** to start sandbox containers from inside it. Access to the Docker socket is root access to your machine, and with it the model's code could start any container it likes. This setup is not supported.
+- Pass credentials with `-e NAME` (the value comes from your environment), not on the command line. They reach `rlm` and the model CLIs. The worker still gets the [scrubbed environment](#the-environment-allowlist).
+- The `:claude` variant signs in to Claude Code with `CLAUDE_CODE_OAUTH_TOKEN` (made by `claude setup-token`) or `ANTHROPIC_API_KEY`. Mounting `~/.claude` would hand the container your whole Claude Code state, so the guide does not suggest it.
 
 ## CLI backends run with their tools disabled
 

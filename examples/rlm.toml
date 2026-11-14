@@ -14,6 +14,7 @@ max_depth = 2                       # levels of sub-agents
 cell_timeout = 120                  # seconds a cell may compute
 # pass_env = ["DATABASE_URL"]       # environment variables model code may see
 # memory_mb = 4096
+# preset = "docker"                 # run model code in a locked-down container (needs Docker)
 
 # Settings for a built-in backend:
 [providers.claude-code]

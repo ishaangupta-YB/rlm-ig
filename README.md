@@ -74,7 +74,31 @@ pip install -e ".[dev]"
 
 **Check it worked:** `rlm --version` prints the version, and `rlm demo` runs a full example with no model and no credentials.
 
-**With Docker.** rlm-ig can already run the model's code inside a container while it runs on your machine; see [Security](https://github.com/ishaangupta-yb/rlm-ig/blob/main/README.md#security) and the [guide](https://github.com/ishaangupta-yb/rlm-ig/blob/main/GUIDE.md#9-run-model-code-in-a-docker-container). A ready-made image for running the whole tool in Docker is not published yet.
+### With Docker
+
+The image runs `rlm` itself, so you need nothing but Docker. Anything after the image name is an `rlm` command line, and `/work` is where you mount your data:
+
+```bash
+# API backend, data in the current directory, traces kept in a named volume
+docker run --rm -e ANTHROPIC_API_KEY -v "$PWD:/work:ro" -v rlm-state:/home/rlm/.local/state \
+  ghcr.io/ishaangupta-yb/rlm-ig "Which IPs failed to log in most?" -f OpenSSH_2k.log -m anthropic:claude-haiku-5-5
+
+# stdin needs -i (not -t)
+cat server.log | docker run --rm -i -e OPENAI_API_KEY ghcr.io/ishaangupta-yb/rlm-ig "Summarise the outage" -m openai:<model>
+
+# Claude Code, with a token from `claude setup-token`
+docker run --rm -e CLAUDE_CODE_OAUTH_TOKEN -v "$PWD:/work:ro" ghcr.io/ishaangupta-yb/rlm-ig:claude "..." -f data.log -m claude-code:haiku
+
+# Ollama on the host
+docker run --rm --add-host=host.docker.internal:host-gateway -e OLLAMA_HOST=http://host.docker.internal:11434 \
+  -v "$PWD:/work:ro" ghcr.io/ishaangupta-yb/rlm-ig "..." -f data.log -m ollama:<model>
+
+# writing output into the mounted directory: run as your own uid
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e ANTHROPIC_API_KEY -v "$PWD:/work" \
+  ghcr.io/ishaangupta-yb/rlm-ig "..." -f data.log -o answer.txt
+```
+
+The default image (about 56 MB compressed) has the Anthropic SDK; the `:claude` variant adds the Claude Code CLI. Both run as an unprivileged user. **Inside this container the model's code can use the same network as `rlm`**, because `rlm` needs it to reach the model; the container only limits which of your files it can see. To keep the model's code off the network, run `rlm` on your machine with `--sandbox docker` instead (see [Security](#security)). Never mount `/var/run/docker.sock` into the container. Details, and how each line was checked: [guide section 10](https://github.com/ishaangupta-yb/rlm-ig/blob/main/GUIDE.md#10-run-everything-in-docker).
 
 You also need at least one model backend:
 
@@ -272,8 +296,8 @@ Full reference: [docs/python-api.md](https://github.com/ishaangupta-yb/rlm-ig/bl
 ```text
 rlm "task" [-f PATH ...] [-m MODEL] [-s SUB_MODEL] [--schema FILE|JSON] [--session NAME]
            [--json] [-o FILE] [--max-usd N] [--max-calls N] [--max-steps N] [--max-depth N]
-           [--timeout S] [--parallel N] [-q | -v]
-rlm doctor [--live]      rlm trace [FILE] [--full] [--html OUT]      rlm demo
+           [--timeout S] [--parallel N] [--sandbox docker[:IMAGE]] [-q | -v]
+rlm doctor [--live] [--sandbox docker[:IMAGE]]      rlm trace [FILE] [--full] [--html OUT]      rlm demo
 ```
 
 - `-f` takes files or directories and can repeat. `.json`, `.jsonl`, `.csv` and `.tsv` are parsed; a directory becomes a dict of path to text. With no `-f`, piped stdin is the data.
@@ -347,15 +371,13 @@ The REPL worker is an ordinary subprocess running as you. **It is not a security
 - The host only ever parses JSON from a worker. It never unpickles anything a worker produced.
 - Claude Code and opencode run with their own tools disabled, in a temporary directory.
 
-For real isolation, wrap the worker with `sandbox.launcher` (a container or jail). The worker's source is shipped over stdin, so nothing needs to be mounted or installed in the image. This Docker setup was checked end to end with Docker 29, including a cell that ran past its time limit:
+For real isolation, run the worker in a container with one flag:
 
-```toml
-# rlm.toml
-[sandbox]
-launcher = ["docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--tmpfs", "/tmp",
-            "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "1g",
-            "--pids-limit", "256", "--user", "65534:65534", "python:3.12-slim"]
+```bash
+rlm "..." -f data.log --sandbox docker
 ```
+
+That starts each worker as `docker run --rm -i --network none --read-only --tmpfs /tmp -w /tmp --cap-drop ALL --security-opt no-new-privileges --memory 1g --pids-limit 256 --user 65534:65534 ghcr.io/ishaangupta-yb/rlm-ig-sandbox:<version>`. The image holds Python 3.12 with numpy, pandas, python-dateutil and regex; `--sandbox docker:IMAGE` picks another. The same is `preset = "docker"` under `[sandbox]` in `rlm.toml`, or `RLM_SANDBOX=docker`. For any other wrapper (a jail, a remote shell), set `sandbox.launcher` to a command prefix. The worker's source is shipped over stdin, so nothing needs to be mounted or installed in the image. The preset is covered by tests that run against a real Docker daemon in CI: no network, read-only root with a writable `/tmp`, and a runaway cell whose container is killed and replaced with none left behind.
 
 The model's code then cannot reach the network or your files, while `ask`, `delegate` and your tools still work, because they run on the host. See [docs/security.md](https://github.com/ishaangupta-yb/rlm-ig/blob/main/docs/security.md), including the note on prompt injection from the data you load.
 
@@ -363,7 +385,8 @@ The model's code then cannot reach the network or your files, while `ask`, `dele
 
 ```bash
 pip install -e ".[dev]"
-pytest                      # 440 tests, about 2 minutes, no network or credentials
+pytest                      # about 2 minutes, no network or credentials
+pytest -m docker            # the container tests, if Docker is running
 ruff check src tests
 ```
 
@@ -386,8 +409,9 @@ Stated plainly, so you know what has and has not been proven:
 - **opencode** was tested by driving the real binary (1.19.x) in both server and run modes against a local model endpoint. Against opencode's hosted free models the development environment only got as far as their rate limit ("Free usage limit reached"), which rlm-ig reported correctly within seconds; a full run on a hosted provider through opencode has not been done.
 - The **Anthropic** and **OpenAI-compatible** backends were tested against local servers that implement the wire formats, not against the live services.
 - The **MCP client** was tested against conformance fakes for both transports, not against third-party servers.
-- The Docker `sandbox.launcher` setup shown above was run with Docker 29 and the `python:3.8-slim`, `python:3.9-slim` and `python:3.12-slim` images. Podman and other runtimes have not been tried.
-- `result.parsed` builds your dataclass with `Cls(**answer)`, so a dataclass nested inside another one stays a plain dict. Use a Pydantic model if you need nested objects built for you.
+- The Docker sandbox was run with Docker 29 and the `python:3.8-slim`, `python:3.9-slim`, `python:3.12-slim` and rlm-ig sandbox images. `--sandbox podman` uses the same flags but has not been tried, nor have other runtimes.
+- The container images were built and run with Docker 29 on Linux amd64. The arm64 images are built by CI under emulation and have not been run on arm64 hardware. The `docker run` lines above were checked against local stand-in API servers, not live services.
+- In the app image, the model's code shares the container's network with `rlm`. Use `--sandbox docker` on the host when it must have no network.
 - A sub-agent cannot see its parent's variables. Everything it needs has to be passed in the call.
 - Sessions save picklable variables and REPL-defined functions. Open files, locks, generators and the like are skipped and reported.
 

@@ -69,6 +69,21 @@ In the repository: **Settings > Environments > New environment**
   deletion, require the CI checks to pass), and add a tag ruleset for `v*`
   that restricts who can create, update or delete release tags.
 
+### 5. Container images on GHCR
+
+`.github/workflows/docker.yml` publishes three images to GitHub Container
+Registry with the workflow's own `GITHUB_TOKEN`. There is no personal token to
+create. GHCR packages start **private**, so after the first push to `main`:
+
+1. Open your GitHub profile > **Packages** > `rlm-ig`.
+2. **Package settings > Change visibility > Public.**
+3. Under **Manage Actions access**, make sure `ishaangupta-yb/rlm-ig` has
+   write access, and use **Connect repository** to link the package to the
+   repository if it is not linked already.
+
+Do the same for `rlm-ig-sandbox`. Until the sandbox image is public, `rlm
+--sandbox docker` with the default image fails to pull for everyone else.
+
 ## Cutting a release
 
 1. Bump `__version__` in `src/rlm_ig/__init__.py` (this is the only place
@@ -94,6 +109,32 @@ In the repository: **Settings > Environments > New environment**
    `v` + `__version__`, builds, checks and uploads.
 7. Optionally create a GitHub release from the tag with the changelog
    entry.
+
+The same tag also runs `docker.yml`, which refuses a tag that does not equal
+`v` + `__version__`, smoke-tests the images, and then pushes them.
+
+## How image tags relate to versions
+
+| Event | `rlm-ig` | `rlm-ig` with Claude Code | `rlm-ig-sandbox` |
+| --- | --- | --- | --- |
+| Tag `vX.Y.Z` | `X.Y.Z`, `X.Y`, `latest` | `X.Y.Z-claude`, `X.Y-claude`, `latest-claude`, `claude` | `X.Y.Z`, `X.Y`, `latest` |
+| Push to `main` | `edge` | `edge-claude` | `edge` |
+| Pull request | built and tested, not pushed | built and tested, not pushed | built and tested, not pushed |
+
+`X.Y.Z` is the same version as the PyPI release built from the same tag.
+`rlm --sandbox docker` uses `rlm-ig-sandbox:<installed version>`, so a PyPI
+release and its sandbox image belong together: publish the tag, let both
+workflows finish, then check the images are public. Images are multi-arch
+(`linux/amd64`, `linux/arm64`), carry BuildKit provenance and an SBOM, and get a
+signed build provenance attestation. Once an image is published, check it with
+
+```bash
+gh attestation verify oci://ghcr.io/ishaangupta-yb/rlm-ig:X.Y.Z --owner ishaangupta-yb
+```
+
+The base images are pinned by digest and Claude Code by version in the
+`Dockerfile`. Dependabot opens pull requests for new base image digests; bump
+`CLAUDE_CODE_VERSION` by hand.
 
 PyPI versions are permanent. A broken release cannot be overwritten, only
 yanked and replaced by a new version number.

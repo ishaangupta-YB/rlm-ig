@@ -1,0 +1,19 @@
+# The build needs only pyproject.toml, README.md, LICENSE and src/.
+.git
+.github
+.venv
+venv
+dist
+build
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.rlm
+*.jsonl
+plans
+tests
+docs
+examples
+docker
+compose.yaml

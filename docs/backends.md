@@ -57,9 +57,9 @@ With no `model` set, rlm-ig picks the first of these that looks ready:
 
 1. `claude` found on `PATH`: `claude-code`.
 2. `opencode` found on `PATH`: `opencode`.
-3. `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set: `anthropic:claude-opus-5-5`.
+3. `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set, and the Anthropic SDK installed: `anthropic:claude-opus-5-5`.
 
-Detection only looks for the binary or the variable. It does not check that you are signed in or that the Anthropic SDK is installed. OpenAI-style keys are never used for auto-detection: set `model` explicitly. If nothing is found, rlm-ig stops with a message that lists the options. `rlm doctor` shows what it found.
+Detection only looks for the binary, the variable and the SDK. It does not check that you are signed in or that a key is valid. If a key is set but the SDK is missing, the error says so and how to install it. OpenAI-style keys are never used for auto-detection: set `model` explicitly. If nothing is found, rlm-ig stops with a message that lists the options. `rlm doctor` shows what it found.
 
 ### Which account pays
 
@@ -248,7 +248,7 @@ One backend, with no dependencies, speaks the chat-completions protocol. These p
 | `deepseek` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
 | `ollama` | `http://localhost:11434/v1` | none |
 
-For `openai`, the `OPENAI_BASE_URL` environment variable overrides the base URL when `base_url` is not set.
+For `openai`, the `OPENAI_BASE_URL` environment variable overrides the base URL when `base_url` is not set. For `ollama`, `OLLAMA_HOST` does, the same variable Ollama itself reads: `OLLAMA_HOST=http://host.docker.internal:11434` gives `http://host.docker.internal:11434/v1`. A bare `host` or `host:port` works too, and a host without a port gets 11434.
 
 ### Settings
 

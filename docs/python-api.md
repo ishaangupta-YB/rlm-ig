@@ -152,7 +152,7 @@ class Invoice(pydantic.BaseModel):
     total: float
 ```
 
-`result.answer` is always the plain validated value (a dict for objects). `result.parsed` is an instance of the class for dataclasses and Pydantic v2 models, and `None` for everything else, or if building the instance fails. Dataclass instances are built with `Person(**answer)`, so nested dataclasses stay dicts. With a scripted model that submits a matching value, the results are:
+`result.answer` is always the plain validated value (a dict for objects). `result.parsed` is an instance of the class for dataclasses and Pydantic v2 models, and `None` for everything else, or if building the instance fails. Dataclasses are built at every level: a field typed `list[Incident]`, `tuple[Incident, ...]`, `dict[str, Incident]` or `Incident | None` holds `Incident` instances. `TypedDict`, `Literal` and enum-typed values stay as the plain JSON values. With a scripted model that submits a matching value, the results are:
 
 ```text
 {'type': 'object', 'properties': {'n': {'type': 'integer'}}, ...} -> ok {'n': 3} None
